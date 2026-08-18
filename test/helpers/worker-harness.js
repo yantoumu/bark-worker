@@ -5,8 +5,88 @@ import { invokeWorker, readJson } from './worker-context.js'
 export const TEST_AUTH = 'admin:correct horse battery staple'
 export const TEST_DEVICE_KEY = 'test-device-key'
 export const TEST_DEVICE_TOKEN = 'a'.repeat(64)
+export const TEST_MASTER_KEY = Buffer.from(Uint8Array.from({ length: 32 }, (_, index) => index + 1)).toString('base64')
+export const TEST_BOOTSTRAP_TOKEN = 'test-bootstrap-token-with-at-least-32-bytes'
+
+const TEST_PASSWORD_SALT = Uint8Array.from({ length: 16 }, (_, index) => 240 - index)
+const PASSWORD_ITERATIONS = 100000
+const PASSWORD_ALGORITHM = 'pbkdf2-sha256+pepper-v1'
+const APNS_AAD = new TextEncoder().encode('bark-worker:apns-credentials:v1')
 
 let credentialsPromise
+let passwordRecordPromise
+let encryptedCredentialsPromise
+
+async function deriveKey(masterKey, purpose, algorithm, usages) {
+    const source = await crypto.subtle.importKey('raw', Buffer.from(masterKey, 'base64'), 'HKDF', false, ['deriveKey'])
+    return crypto.subtle.deriveKey({
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new TextEncoder().encode('bark-worker:v1'),
+        info: new TextEncoder().encode(purpose),
+    }, source, algorithm, false, usages)
+}
+
+async function testPasswordRecord() {
+    passwordRecordPromise ??= (async () => {
+        const [, password] = TEST_AUTH.split(':', 2)
+        const pepperKey = await deriveKey(
+            TEST_MASTER_KEY,
+            'password-pepper',
+            { name: 'HMAC', hash: 'SHA-256', length: 256 },
+            ['sign'],
+        )
+        const peppered = await crypto.subtle.sign('HMAC', pepperKey, new TextEncoder().encode(password))
+        const material = await crypto.subtle.importKey('raw', peppered, 'PBKDF2', false, ['deriveBits'])
+        const hash = await crypto.subtle.deriveBits({
+            name: 'PBKDF2',
+            hash: 'SHA-256',
+            salt: TEST_PASSWORD_SALT,
+            iterations: PASSWORD_ITERATIONS,
+        }, material, 256)
+        const now = Math.floor(Date.now() / 1000)
+        return {
+            username: 'admin',
+            password_hash: Buffer.from(hash).toString('base64'),
+            password_salt: Buffer.from(TEST_PASSWORD_SALT).toString('base64'),
+            password_iterations: PASSWORD_ITERATIONS,
+            password_algorithm: PASSWORD_ALGORITHM,
+            role: 'admin',
+            disabled: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    })()
+    return passwordRecordPromise
+}
+
+async function encryptedTestAPNsCredentials() {
+    encryptedCredentialsPromise ??= (async () => {
+        const credentials = await testAPNsCredentials()
+        const payload = JSON.stringify({
+            private_key: credentials.APNS_PRIVATE_KEY,
+            team_id: credentials.APNS_TEAM_ID,
+            key_id: credentials.APNS_KEY_ID,
+            topic: credentials.APNS_TOPIC,
+        })
+        const key = await deriveKey(TEST_MASTER_KEY, 'apns-vault', { name: 'AES-GCM', length: 256 }, ['encrypt'])
+        const iv = Uint8Array.from({ length: 12 }, (_, index) => 32 + index)
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv, additionalData: APNS_AAD, tagLength: 128 },
+            key,
+            new TextEncoder().encode(payload),
+        )
+        return {
+            id: 1,
+            ciphertext: Buffer.from(ciphertext).toString('base64'),
+            iv: Buffer.from(iv).toString('base64'),
+            key_version: 1,
+            updated_by: 'admin',
+            updated_at: Math.floor(Date.now() / 1000),
+        }
+    })()
+    return encryptedCredentialsPromise
+}
 
 async function createTestAPNsCredentials() {
     const keyPair = await crypto.subtle.generateKey(
@@ -32,11 +112,26 @@ export async function testAPNsCredentials() {
 }
 
 export async function createTestEnv(overrides = {}) {
+    const {
+        TEST_SKIP_D1_AUTH_SEED = false,
+        TEST_SKIP_D1_APNS_SEED = false,
+        ...environmentOverrides
+    } = overrides
+    const database = environmentOverrides.database ?? new FakeD1Database()
+    if (database instanceof FakeD1Database && !TEST_SKIP_D1_AUTH_SEED && database.users.size === 0) {
+        const record = await testPasswordRecord()
+        database.users.set(record.username, structuredClone(record))
+    }
+    if (database instanceof FakeD1Database && !TEST_SKIP_D1_APNS_SEED && database.apnsCredentials === null) {
+        database.apnsCredentials = structuredClone(await encryptedTestAPNsCredentials())
+    }
     return {
-        database: new FakeD1Database(),
+        database,
         ROOT_PATH: '/',
         SECURITY_MODE: 'strict',
         BASIC_AUTH: TEST_AUTH,
+        APP_MASTER_KEY: TEST_MASTER_KEY,
+        ADMIN_BOOTSTRAP_TOKEN: TEST_BOOTSTRAP_TOKEN,
         ALLOW_NEW_DEVICE: 'false',
         ALLOW_QUERY_NUMS: 'false',
         ALLOW_LEGACY_GET_REGISTER: 'false',
@@ -51,8 +146,9 @@ export async function createTestEnv(overrides = {}) {
         PUSH_RATE_LIMITER: new FakeRateLimiter(),
         BATCH_RATE_LIMITER: new FakeRateLimiter(),
         MCP_RATE_LIMITER: new FakeRateLimiter(),
+        AUTH_RATE_LIMITER: new FakeRateLimiter(),
         ...(await testAPNsCredentials()),
-        ...overrides,
+        ...environmentOverrides,
     }
 }
 
@@ -106,9 +202,13 @@ export function installDeterministicSignature(t, bytes = new Uint8Array([
     const subtle = new Proxy(originalCrypto.subtle, {
         get(target, property) {
             if (property === 'sign') {
-                return async () => {
-                    state.calls += 1
-                    return bytes.buffer.slice(0)
+                return async (...args) => {
+                    const algorithm = typeof args[0] === 'string' ? args[0] : args[0]?.name
+                    if (algorithm === 'ECDSA') {
+                        state.calls += 1
+                        return bytes.buffer.slice(0)
+                    }
+                    return target.sign(...args)
                 }
             }
             const value = Reflect.get(target, property, target)

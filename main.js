@@ -1,8 +1,15 @@
-const VERSION = 'v2.4.0'
+const VERSION = 'v2.5.0'
 const BUILD = '2026-08-18'
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-03-26', '2025-06-18'])
 const encoder = new TextEncoder()
 const schemaPromises = new WeakMap()
+const PASSWORD_ITERATIONS = 100000
+const PASSWORD_ALGORITHM = 'pbkdf2-sha256+pepper-v1'
+const AUTH_SESSION_TTL_SECONDS = 86400
+const APNS_CREDENTIAL_KEY_VERSION = 1
+const APNS_CREDENTIAL_AAD = encoder.encode('bark-worker:apns-credentials:v1')
+const PKCS8_PRIVATE_KEY_BEGIN = ['-----BEGIN ', 'PRIVATE KEY-----'].join('')
+const PKCS8_PRIVATE_KEY_END = ['-----END ', 'PRIVATE KEY-----'].join('')
 
 let apnsTokenCache = {
     credentials: null,
@@ -71,16 +78,48 @@ async function handleRequest(request, env, ctx, pathname, requestId) {
 
     const config = parseConfig(env)
 
+    if (pathname === '/auth/setup') {
+        if (request.method !== 'POST') return methodNotAllowed(['POST'])
+        return handleAuthSetup(request, env, config)
+    }
+
+    if (pathname === '/auth/login') {
+        if (request.method !== 'POST') return methodNotAllowed(['POST'])
+        return handleAuthLogin(request, env, config)
+    }
+
+    if (pathname === '/auth/logout') {
+        if (request.method !== 'POST') return methodNotAllowed(['POST'])
+        return handleAuthLogout(request, env, config)
+    }
+
+    if (pathname === '/auth/me') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return handleAuthMe(request, env, config)
+    }
+
+    if (pathname === '/admin/users') {
+        if (request.method !== 'POST') return methodNotAllowed(['POST'])
+        return handleAdminUsers(request, env, config)
+    }
+
+    if (pathname === '/admin/apns') {
+        if (!['GET', 'PUT'].includes(request.method)) return methodNotAllowed(['GET', 'PUT'])
+        return handleAdminAPNs(request, env, config)
+    }
+
+    if (pathname.startsWith('/auth/') || pathname.startsWith('/admin/')) return jsonError(404, 'not found')
+
     if (pathname === '/register') {
         return handleRegister(request, env, config)
     }
 
     if (pathname === '/info') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
-        const auth = authorize(request, config, { required: true })
-        if (auth.response) return auth.response
         const db = new Database(env.database)
         await db.ensureSchema()
+        const auth = await authorize(request, env, db, config, { required: true })
+        if (auth.response) return auth.response
         const body = {
             version: VERSION,
             build: BUILD,
@@ -107,6 +146,169 @@ async function handleRequest(request, env, ctx, pathname, requestId) {
     if (!['GET', 'POST'].includes(request.method)) return methodNotAllowed(['GET', 'POST'])
     const decoded = parts.map(decodePathSegment)
     return handlePush(request, env, config, decoded, requestId)
+}
+
+async function handleAuthSetup(request, env, config) {
+    const limited = await enforceRateLimit(
+        env.REGISTER_RATE_LIMITER,
+        `setup:${await fingerprint(request.headers.get('cf-connecting-ip') || 'unknown')}`,
+    )
+    if (limited) return limited
+    const suppliedToken = request.headers.get('x-bootstrap-token')
+    if (!suppliedToken || !constantTimeCompare(suppliedToken, config.bootstrapToken)) return unauthorized()
+
+    const input = await parseStructuredBody(request, config, ['application/json'])
+    const username = validateUsername(input.username)
+    const password = validatePassword(input.password)
+    const passwordRecord = await createPasswordRecord(password, config.masterKey)
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const created = await db.createFirstUser(username, passwordRecord)
+    if (!created) throw new AppError(409, 'setup already completed')
+    return jsonResponse({
+        code: 201,
+        message: 'created',
+        data: { user: { username, role: 'admin' } },
+        timestamp: timestamp(),
+    }, 201, { 'cache-control': 'no-store' })
+}
+
+async function handleAuthLogin(request, env, config) {
+    const input = await parseStructuredBody(request, config, ['application/json'])
+    const username = validateUsername(input.username)
+    const password = validatePassword(input.password)
+    const limited = await enforceRateLimit(
+        env.AUTH_RATE_LIMITER,
+        `login:${await fingerprint(`${request.headers.get('cf-connecting-ip') || 'unknown'}\u0000${username}`)}`,
+    )
+    if (limited) return limited
+
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const user = await db.userByUsername(username)
+    if (!await passwordMatches(password, user, config.masterKey)) return unauthorized()
+
+    const tokenBytes = new Uint8Array(32)
+    crypto.getRandomValues(tokenBytes)
+    const token = base64URL(tokenBytes)
+    const tokenHash = await sha256Base64URL(token)
+    const expiresAt = timestamp() + AUTH_SESSION_TTL_SECONDS
+    await db.saveAuthSession(tokenHash, user.username, expiresAt)
+    return jsonResponse({
+        code: 200,
+        message: 'success',
+        data: {
+            token,
+            token_type: 'Bearer',
+            expires_at: expiresAt,
+            user: { username: user.username, role: user.role },
+        },
+        timestamp: timestamp(),
+    }, 200, { 'cache-control': 'no-store' })
+}
+
+async function handleAuthLogout(request, env, config) {
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: true })
+    if (auth.response) return auth.response
+    if (auth.sessionTokenHash) await db.deleteAuthSession(auth.sessionTokenHash)
+    return jsonResponse({ code: 200, message: 'success', timestamp: timestamp() }, 200, { 'cache-control': 'no-store' })
+}
+
+async function handleAuthMe(request, env, config) {
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: true })
+    if (auth.response) return auth.response
+    return jsonResponse({
+        code: 200,
+        message: 'success',
+        data: { user: { username: auth.user.username, role: auth.user.role } },
+        timestamp: timestamp(),
+    }, 200, { 'cache-control': 'no-store' })
+}
+
+async function handleAdminUsers(request, env, config) {
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: true })
+    if (auth.response) return auth.response
+    if (auth.user.role !== 'admin') throw new AppError(403, 'forbidden')
+    const input = await parseStructuredBody(request, config, ['application/json'])
+    const username = validateUsername(input.username)
+    const password = validatePassword(input.password)
+    const role = input.role ?? 'user'
+    if (!['admin', 'user'].includes(role)) throw new AppError(400, 'role is invalid')
+    const passwordRecord = await createPasswordRecord(password, config.masterKey)
+    const created = await db.createUser(username, passwordRecord, role)
+    if (!created) throw new AppError(409, 'user already exists')
+    return jsonResponse({
+        code: 201,
+        message: 'created',
+        data: { user: { username, role } },
+        timestamp: timestamp(),
+    }, 201, { 'cache-control': 'no-store' })
+}
+
+async function handleAdminAPNs(request, env, config) {
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: true })
+    if (auth.response) return auth.response
+    if (auth.user.role !== 'admin') throw new AppError(403, 'forbidden')
+
+    if (request.method === 'GET') {
+        const row = await db.apnsCredentialRecord()
+        if (!row) {
+            return jsonResponse({
+                code: 200,
+                message: 'success',
+                data: { configured: false },
+                timestamp: timestamp(),
+            }, 200, { 'cache-control': 'no-store' })
+        }
+        const credentials = await decryptAPNsCredentials(row, config.masterKey)
+        return jsonResponse({
+            code: 200,
+            message: 'success',
+            data: {
+                configured: true,
+                team_id: credentials.apnsTeamID,
+                key_id: credentials.apnsKeyID,
+                topic: credentials.apnsTopic,
+                updated_at: Number(row.updated_at),
+            },
+            timestamp: timestamp(),
+        }, 200, { 'cache-control': 'no-store' })
+    }
+
+    const input = await parseStructuredBody(request, config, ['application/json'])
+    const credentials = validateAPNsCredentials({
+        apnsPrivateKey: input.private_key,
+        apnsTeamID: input.team_id,
+        apnsKeyID: input.key_id,
+        apnsTopic: input.topic,
+    }, 400)
+    try {
+        await importAPNsSigningKey(credentials.apnsPrivateKey)
+    } catch (error) {
+        throw new AppError(400, 'APNs credentials are invalid')
+    }
+    const encrypted = await encryptAPNsCredentials(credentials, config.masterKey)
+    await db.saveAPNsCredential(encrypted, auth.user.username)
+    apnsTokenCache = { credentials: null, token: null, expiresAt: 0, promise: null }
+    return jsonResponse({
+        code: 200,
+        message: 'success',
+        data: {
+            configured: true,
+            team_id: credentials.apnsTeamID,
+            key_id: credentials.apnsKeyID,
+            topic: credentials.apnsTopic,
+        },
+        timestamp: timestamp(),
+    }, 200, { 'cache-control': 'no-store' })
 }
 
 async function healthz(env) {
@@ -139,14 +341,17 @@ async function handleRegister(request, env, config) {
         return methodNotAllowed(config.allowLegacyGetRegister ? ['GET', 'POST'] : ['POST'])
     }
 
-    const auth = authorize(request, config, { required: config.securityMode === 'strict' })
-    if (auth.response) return decorateLegacyGET(auth.response, legacyGET, config)
-
-    const subject = auth.authenticated
-        ? `auth:${await fingerprint(config.basicAuth)}`
-        : `ip:${await fingerprint(request.headers.get('cf-connecting-ip') || 'unknown')}`
+    const subjectSource = request.headers.get('authorization')
+        || request.headers.get('cf-connecting-ip')
+        || 'anonymous'
+    const subject = `request:${await fingerprint(subjectSource)}`
     const limited = await enforceRateLimit(env.REGISTER_RATE_LIMITER, subject)
     if (limited) return decorateLegacyGET(limited, legacyGET, config)
+
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: config.securityMode === 'strict' })
+    if (auth.response) return decorateLegacyGET(auth.response, legacyGET, config)
 
     let input
     if (legacyGET) {
@@ -164,8 +369,6 @@ async function handleRegister(request, env, config) {
     }
     validateDeviceKey(key)
 
-    const db = new Database(env.database)
-    await db.ensureSchema()
     const existing = await db.deviceByKey(key)
 
     if (existing.token !== undefined) {
@@ -213,15 +416,12 @@ function decorateLegacyGET(response, legacyGET, config) {
 }
 
 async function handlePush(request, env, config, pathParts, requestId) {
-    const auth = authorize(request, config, { required: config.securityMode === 'strict' })
-    if (auth.response) return auth.response
-
     const parameters = await parsePushParameters(request, config, pathParts)
     if (Object.prototype.hasOwnProperty.call(parameters, 'device_keys')) {
         const deviceKeys = parseDeviceKeys(parameters.device_keys, config.maxBatchSize)
-        const subjectValue = auth.authenticated
-            ? config.basicAuth
-            : request.headers.get('cf-connecting-ip') || 'anonymous'
+        const subjectValue = request.headers.get('authorization')
+            || request.headers.get('cf-connecting-ip')
+            || 'anonymous'
         const limited = await enforceRateLimit(env.BATCH_RATE_LIMITER, `batch:${await fingerprint(subjectValue)}`)
         if (limited) return limited
 
@@ -232,10 +432,13 @@ async function handlePush(request, env, config, pathParts, requestId) {
         const prepared = prepareAPNsPayload(validated, config)
         const db = new Database(env.database)
         await db.ensureSchema()
+        const auth = await authorize(request, env, db, config, { required: config.securityMode === 'strict' })
+        if (auth.response) return auth.response
+        const apnsConfigPromise = loadAPNsConfig(db, config)
 
         const results = await mapWithConcurrency(deviceKeys, config.batchConcurrency, async (deviceKey) => {
             try {
-                const response = await pushPrepared(db, config, prepared, deviceKey, requestId)
+                const response = await pushPrepared(db, config, prepared, deviceKey, requestId, apnsConfigPromise)
                 const body = await safeJSON(response)
                 return {
                     code: response.status,
@@ -272,6 +475,8 @@ async function handlePush(request, env, config, pathParts, requestId) {
     const prepared = prepareAPNsPayload(validated, config)
     const db = new Database(env.database)
     await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: config.securityMode === 'strict' })
+    if (auth.response) return auth.response
     return pushPrepared(db, config, prepared, validated.device_key, requestId)
 }
 
@@ -427,7 +632,7 @@ function prepareAPNsPayload(parameters, config) {
     }
 }
 
-async function pushPrepared(db, config, prepared, deviceKey, requestId) {
+async function pushPrepared(db, config, prepared, deviceKey, requestId, apnsConfigPromise = null) {
     validateDeviceKey(deviceKey)
     const device = await db.deviceByKey(deviceKey)
     if (!device.token) return jsonError(400, 'invalid device key')
@@ -439,7 +644,8 @@ async function pushPrepared(db, config, prepared, deviceKey, requestId) {
         return jsonError(400, 'invalid device key')
     }
 
-    const apns = new APNs(config)
+    const apnsConfig = await (apnsConfigPromise ?? loadAPNsConfig(db, config))
+    const apns = new APNs({ ...config, ...apnsConfig })
     const result = await apns.push(deviceToken, prepared.headers, prepared.body)
     if (result.ok) {
         return jsonResponse({ code: 200, message: 'success', timestamp: timestamp() })
@@ -577,19 +783,7 @@ async function getAPNsProviderToken(config) {
 }
 
 async function generateAPNsProviderToken(config) {
-    const encodedKey = config.apnsPrivateKey
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith('-----'))
-        .join('')
-    const keyBytes = base64Decode(encodedKey)
-    const privateKey = await crypto.subtle.importKey(
-        'pkcs8',
-        keyBytes,
-        { name: 'ECDSA', namedCurve: 'P-256' },
-        false,
-        ['sign'],
-    )
+    const privateKey = await importAPNsSigningKey(config.apnsPrivateKey)
     const header = base64URL(JSON.stringify({ alg: 'ES256', kid: config.apnsKeyID }))
     const claims = base64URL(JSON.stringify({ iss: config.apnsTeamID, iat: timestamp() }))
     const unsigned = `${header}.${claims}`
@@ -599,6 +793,22 @@ async function generateAPNsProviderToken(config) {
         encoder.encode(unsigned),
     )
     return `${unsigned}.${base64URL(new Uint8Array(signature))}`
+}
+
+async function importAPNsSigningKey(privateKey) {
+    const encodedKey = privateKey
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('-----'))
+        .join('')
+    const keyBytes = base64Decode(encodedKey)
+    return crypto.subtle.importKey(
+        'pkcs8',
+        keyBytes,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['sign'],
+    )
 }
 
 class Database {
@@ -630,6 +840,11 @@ class Database {
         await this.db.exec('CREATE TABLE IF NOT EXISTS `sessions` (`id` VARCHAR(64) PRIMARY KEY, `device_key` VARCHAR(255), `initialized` INTEGER DEFAULT 0, `created_at` INTEGER NOT NULL, `last_seen` INTEGER NOT NULL)')
         await this.db.exec('CREATE INDEX IF NOT EXISTS `idx_sessions_last_seen` ON `sessions` (`last_seen`)')
         await this.db.exec('CREATE INDEX IF NOT EXISTS `idx_sessions_created_at` ON `sessions` (`created_at`)')
+        await this.db.exec("CREATE TABLE IF NOT EXISTS `users` (`username` TEXT PRIMARY KEY COLLATE NOCASE, `password_hash` TEXT NOT NULL, `password_salt` TEXT NOT NULL, `password_iterations` INTEGER NOT NULL, `password_algorithm` TEXT NOT NULL, `role` TEXT NOT NULL CHECK (`role` IN ('admin', 'user')), `disabled` INTEGER NOT NULL DEFAULT 0 CHECK (`disabled` IN (0, 1)), `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL)")
+        await this.db.exec('CREATE TABLE IF NOT EXISTS `auth_sessions` (`token_hash` TEXT PRIMARY KEY, `username` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `expires_at` INTEGER NOT NULL, FOREIGN KEY (`username`) REFERENCES `users` (`username`) ON DELETE CASCADE)')
+        await this.db.exec('CREATE INDEX IF NOT EXISTS `idx_auth_sessions_expires_at` ON `auth_sessions` (`expires_at`)')
+        await this.db.exec('CREATE INDEX IF NOT EXISTS `idx_auth_sessions_username` ON `auth_sessions` (`username`)')
+        await this.db.exec('CREATE TABLE IF NOT EXISTS `apns_credentials` (`id` INTEGER PRIMARY KEY CHECK (`id` = 1), `ciphertext` TEXT NOT NULL, `iv` TEXT NOT NULL, `key_version` INTEGER NOT NULL, `updated_by` TEXT NOT NULL, `updated_at` INTEGER NOT NULL, FOREIGN KEY (`updated_by`) REFERENCES `users` (`username`))')
     }
 
     async ready() {
@@ -666,6 +881,75 @@ class Database {
             .run()
     }
 
+    async userByUsername(username) {
+        const result = await this.db.prepare('SELECT `username`, `password_hash`, `password_salt`, `password_iterations`, `password_algorithm`, `role`, `disabled` FROM `users` WHERE `username` = ?')
+            .bind(username)
+            .run()
+        return result.results?.[0] ?? null
+    }
+
+    async createFirstUser(username, passwordRecord) {
+        const now = timestamp()
+        const result = await this.db.prepare("INSERT OR IGNORE INTO `users` (`username`, `password_hash`, `password_salt`, `password_iterations`, `password_algorithm`, `role`, `created_at`, `updated_at`) SELECT ?, ?, ?, ?, ?, 'admin', ?, ? WHERE NOT EXISTS (SELECT 1 FROM `users`)")
+            .bind(
+                username,
+                passwordRecord.passwordHash,
+                passwordRecord.passwordSalt,
+                passwordRecord.passwordIterations,
+                passwordRecord.passwordAlgorithm,
+                now,
+                now,
+            )
+            .run()
+        return Number(result.meta?.changes ?? 0) === 1
+    }
+
+    async createUser(username, passwordRecord, role) {
+        const now = timestamp()
+        const result = await this.db.prepare('INSERT OR IGNORE INTO `users` (`username`, `password_hash`, `password_salt`, `password_iterations`, `password_algorithm`, `role`, `created_at`, `updated_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .bind(
+                username,
+                passwordRecord.passwordHash,
+                passwordRecord.passwordSalt,
+                passwordRecord.passwordIterations,
+                passwordRecord.passwordAlgorithm,
+                role,
+                now,
+                now,
+            )
+            .run()
+        return Number(result.meta?.changes ?? 0) === 1
+    }
+
+    async saveAuthSession(tokenHash, username, expiresAt) {
+        const now = timestamp()
+        return this.db.prepare('INSERT INTO `auth_sessions` (`token_hash`, `username`, `created_at`, `expires_at`) VALUES (?, ?, ?, ?)')
+            .bind(tokenHash, username, now, expiresAt)
+            .run()
+    }
+
+    async authSession(tokenHash) {
+        const result = await this.db.prepare('SELECT `users`.`username`, `users`.`role`, `auth_sessions`.`expires_at` FROM `auth_sessions` JOIN `users` ON `users`.`username` = `auth_sessions`.`username` WHERE `auth_sessions`.`token_hash` = ? AND `auth_sessions`.`expires_at` > ? AND `users`.`disabled` = 0')
+            .bind(tokenHash, timestamp())
+            .run()
+        return result.results?.[0] ?? null
+    }
+
+    async deleteAuthSession(tokenHash) {
+        return this.db.prepare('DELETE FROM `auth_sessions` WHERE `token_hash` = ?').bind(tokenHash).run()
+    }
+
+    async apnsCredentialRecord() {
+        const result = await this.db.prepare('SELECT `ciphertext`, `iv`, `key_version`, `updated_by`, `updated_at` FROM `apns_credentials` WHERE `id` = 1').run()
+        return result.results?.[0] ?? null
+    }
+
+    async saveAPNsCredential(encrypted, username) {
+        return this.db.prepare('INSERT INTO `apns_credentials` (`id`, `ciphertext`, `iv`, `key_version`, `updated_by`, `updated_at`) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT(`id`) DO UPDATE SET `ciphertext` = EXCLUDED.`ciphertext`, `iv` = EXCLUDED.`iv`, `key_version` = EXCLUDED.`key_version`, `updated_by` = EXCLUDED.`updated_by`, `updated_at` = EXCLUDED.`updated_at`')
+            .bind(encrypted.ciphertext, encrypted.iv, APNS_CREDENTIAL_KEY_VERSION, username, timestamp())
+            .run()
+    }
+
     async sessionByID(sessionID) {
         const now = timestamp()
         const result = await this.db.prepare('SELECT `id`, `device_key`, `initialized`, `created_at`, `last_seen` FROM `sessions` WHERE `id` = ? AND `last_seen` > ? AND `created_at` > ?')
@@ -693,6 +977,13 @@ class Database {
         const old = await this.db.prepare('DELETE FROM `sessions` WHERE `created_at` < ?').bind(now - 86400).run()
         return Number(idle.meta?.changes ?? 0) + Number(old.meta?.changes ?? 0)
     }
+
+    async cleanupAuthSessions() {
+        const result = await this.db.prepare('DELETE FROM `auth_sessions` WHERE `expires_at` < ?')
+            .bind(timestamp())
+            .run()
+        return Number(result.meta?.changes ?? 0)
+    }
 }
 
 async function runScheduled(env, controller) {
@@ -700,8 +991,15 @@ async function runScheduled(env, controller) {
     try {
         const db = new Database(env.database)
         await db.ensureSchema()
-        const deleted = await db.cleanupSessions()
-        console.log(JSON.stringify({ event: 'session_cleanup', deleted, duration_ms: Date.now() - started }))
+        const mcpDeleted = await db.cleanupSessions()
+        const authDeleted = await db.cleanupAuthSessions()
+        console.log(JSON.stringify({
+            event: 'session_cleanup',
+            deleted: mcpDeleted + authDeleted,
+            mcp_deleted: mcpDeleted,
+            auth_deleted: authDeleted,
+            duration_ms: Date.now() - started,
+        }))
     } catch (error) {
         console.error(JSON.stringify({ event: 'session_cleanup_failed', duration_ms: Date.now() - started }))
         throw error
@@ -709,8 +1007,6 @@ async function runScheduled(env, controller) {
 }
 
 async function handleMCP(request, env, config, deviceKey, requestId) {
-    const auth = authorize(request, config, { required: true })
-    if (auth.response) return auth.response
     if (!originAllowed(request.headers.get('origin'), config.mcpAllowedOrigins)) {
         return jsonError(403, 'origin is not allowed')
     }
@@ -720,9 +1016,11 @@ async function handleMCP(request, env, config, deviceKey, requestId) {
     const sessionHeader = request.headers.get('mcp-session-id')
 
     if (request.method === 'DELETE') {
-        if (!sessionHeader) return jsonError(400, 'missing session ID')
         const db = new Database(env.database)
         await db.ensureSchema()
+        const auth = await authorize(request, env, db, config, { required: true })
+        if (auth.response) return auth.response
+        if (!sessionHeader) return jsonError(400, 'missing session ID')
         const session = await db.sessionByID(sessionHeader)
         if (!session) return jsonError(404, 'session not found')
         if (!sessionOwnedByPath(session, deviceKey)) return jsonError(403, 'session not found')
@@ -752,11 +1050,18 @@ async function handleMCP(request, env, config, deviceKey, requestId) {
     if (jsonrpc !== '2.0' || typeof method !== 'string') return rpcError(id ?? null, -32600, 'Invalid Request')
 
     if (method === 'initialize') {
+        const subject = request.headers.get('authorization')
+            || request.headers.get('cf-connecting-ip')
+            || 'anonymous'
         const limited = await enforceRateLimit(
             env.MCP_RATE_LIMITER,
-            `mcp:auth:${await fingerprint(config.basicAuth)}`,
+            `mcp:auth:${await fingerprint(subject)}`,
         )
         if (limited) return limited
+        const db = new Database(env.database)
+        await db.ensureSchema()
+        const auth = await authorize(request, env, db, config, { required: true })
+        if (auth.response) return auth.response
         if (sessionHeader) return jsonError(400, 'initialize must not include a session ID')
         if (!hasID) return new Response(null, { status: 202 })
         const protocolVersion = params?.protocolVersion
@@ -764,8 +1069,6 @@ async function handleMCP(request, env, config, deviceKey, requestId) {
             return rpcError(id ?? null, -32602, 'Unsupported protocol version')
         }
         const sessionID = newMCPSessionID(protocolVersion)
-        const db = new Database(env.database)
-        await db.ensureSchema()
         await db.saveSession(sessionID, deviceKey, false)
         return rpcResult(id, {
             protocolVersion,
@@ -777,9 +1080,11 @@ async function handleMCP(request, env, config, deviceKey, requestId) {
         })
     }
 
-    if (!sessionHeader) return jsonError(400, 'missing session ID')
     const db = new Database(env.database)
     await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: true })
+    if (auth.response) return auth.response
+    if (!sessionHeader) return jsonError(400, 'missing session ID')
     const session = await db.sessionByID(sessionHeader)
     if (!session) return jsonError(404, 'session not found')
     if (!sessionOwnedByPath(session, deviceKey)) return jsonError(403, 'session not found')
@@ -921,16 +1226,9 @@ function parseConfig(env) {
         if (!validHTTPDate(legacyGetRegisterSunset)) throw new AppError(503, 'configuration unavailable')
     }
 
-    const basicAuth = optionalConfigString(env.BASIC_AUTH)
-    if (securityMode === 'strict' && !basicAuth) throw new AppError(503, 'configuration unavailable')
-    const apnsPrivateKey = requiredConfigString(env.APNS_PRIVATE_KEY)
-    const apnsTeamID = requiredConfigString(env.APNS_TEAM_ID)
-    const apnsKeyID = requiredConfigString(env.APNS_KEY_ID)
-    const apnsTopic = requiredConfigString(env.APNS_TOPIC)
-    if (!validEncodedPrivateKey(apnsPrivateKey)
-        || !/^[A-Za-z0-9._-]{1,128}$/.test(apnsTeamID)
-        || !/^[A-Za-z0-9._-]{1,128}$/.test(apnsKeyID)
-        || !/^[A-Za-z0-9.-]{1,255}$/.test(apnsTopic)) {
+    const masterKey = parseMasterKey(env.APP_MASTER_KEY)
+    const bootstrapToken = requiredConfigString(env.ADMIN_BOOTSTRAP_TOKEN)
+    if (encoder.encode(bootstrapToken).byteLength < 32 || encoder.encode(bootstrapToken).byteLength > 256) {
         throw new AppError(503, 'configuration unavailable')
     }
 
@@ -942,7 +1240,8 @@ function parseConfig(env) {
 
     return {
         securityMode,
-        basicAuth,
+        masterKey,
+        bootstrapToken,
         allowNewDevice,
         allowQueryNums,
         allowLegacyGetRegister,
@@ -952,10 +1251,6 @@ function parseConfig(env) {
         maxBatchSize,
         batchConcurrency,
         apnsTimeoutMs,
-        apnsPrivateKey,
-        apnsTeamID,
-        apnsKeyID,
-        apnsTopic,
         mcpAllowedOrigins: parseOrigins(env.MCP_ALLOWED_ORIGINS),
     }
 }
@@ -1024,8 +1319,11 @@ function validHTTPDate(value) {
 }
 
 function validEncodedPrivateKey(value) {
+    if (typeof value !== 'string') return false
     const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    if (lines.length < 3 || !lines[0].startsWith('-----') || !lines.at(-1).startsWith('-----')) return false
+    if (lines.length < 3
+        || lines[0] !== PKCS8_PRIVATE_KEY_BEGIN
+        || lines.at(-1) !== PKCS8_PRIVATE_KEY_END) return false
     const encoded = lines.slice(1, -1).join('')
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return false
     try {
@@ -1033,6 +1331,163 @@ function validEncodedPrivateKey(value) {
     } catch (error) {
         return false
     }
+}
+
+function validateUsername(value) {
+    if (typeof value !== 'string') throw new AppError(400, 'username is invalid')
+    const username = value.toLowerCase()
+    if (!/^[a-z0-9](?:[a-z0-9._-]{1,62}[a-z0-9])$/.test(username)) {
+        throw new AppError(400, 'username is invalid')
+    }
+    return username
+}
+
+function validatePassword(value) {
+    if (typeof value !== 'string') throw new AppError(400, 'password is invalid')
+    const length = encoder.encode(value).byteLength
+    if (length < 12 || length > 128) throw new AppError(400, 'password is invalid')
+    return value
+}
+
+async function deriveApplicationKey(masterKey, purpose, algorithm, usages) {
+    const source = await crypto.subtle.importKey('raw', base64Decode(masterKey), 'HKDF', false, ['deriveKey'])
+    return crypto.subtle.deriveKey({
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: encoder.encode('bark-worker:v1'),
+        info: encoder.encode(purpose),
+    }, source, algorithm, false, usages)
+}
+
+async function passwordDigest(password, salt, iterations, masterKey) {
+    const pepperKey = await deriveApplicationKey(
+        masterKey,
+        'password-pepper',
+        { name: 'HMAC', hash: 'SHA-256', length: 256 },
+        ['sign'],
+    )
+    const peppered = await crypto.subtle.sign('HMAC', pepperKey, encoder.encode(password))
+    const material = await crypto.subtle.importKey('raw', peppered, 'PBKDF2', false, ['deriveBits'])
+    return new Uint8Array(await crypto.subtle.deriveBits({
+        name: 'PBKDF2',
+        hash: 'SHA-256',
+        salt,
+        iterations,
+    }, material, 256))
+}
+
+async function createPasswordRecord(password, masterKey) {
+    const salt = new Uint8Array(16)
+    crypto.getRandomValues(salt)
+    const hash = await passwordDigest(password, salt, PASSWORD_ITERATIONS, masterKey)
+    return {
+        passwordHash: base64Encode(hash),
+        passwordSalt: base64Encode(salt),
+        passwordIterations: PASSWORD_ITERATIONS,
+        passwordAlgorithm: PASSWORD_ALGORITHM,
+    }
+}
+
+async function passwordMatches(password, user, masterKey) {
+    const passwordBytes = typeof password === 'string' ? encoder.encode(password).byteLength : 0
+    if (passwordBytes === 0 || passwordBytes > 128) return false
+    const dummyRecord = {
+        password_hash: base64Encode(new Uint8Array(32)),
+        password_salt: base64Encode(new Uint8Array(16)),
+        password_iterations: PASSWORD_ITERATIONS,
+        password_algorithm: PASSWORD_ALGORITHM,
+        disabled: 0,
+    }
+    const metadataValid = user?.password_algorithm === PASSWORD_ALGORITHM
+        && Number(user?.password_iterations) === PASSWORD_ITERATIONS
+    const record = metadataValid ? user : dummyRecord
+    let salt
+    let expected
+    try {
+        salt = base64Decode(record.password_salt)
+        expected = base64Decode(record.password_hash)
+    } catch (error) {
+        return false
+    }
+    if (salt.byteLength !== 16 || expected.byteLength !== 32) return false
+    const actual = await passwordDigest(password, salt, PASSWORD_ITERATIONS, masterKey)
+    return Boolean(user && metadataValid && !Number(user.disabled) && constantTimeBytes(actual, expected))
+}
+
+function validateAPNsCredentials(credentials, status = 503) {
+    if (!validEncodedPrivateKey(credentials?.apnsPrivateKey)
+        || !/^[A-Za-z0-9._-]{1,128}$/.test(credentials?.apnsTeamID ?? '')
+        || !/^[A-Za-z0-9._-]{1,128}$/.test(credentials?.apnsKeyID ?? '')
+        || !/^[A-Za-z0-9.-]{1,255}$/.test(credentials?.apnsTopic ?? '')) {
+        throw new AppError(status, status === 400 ? 'APNs credentials are invalid' : 'APNs configuration unavailable')
+    }
+    return credentials
+}
+
+async function encryptAPNsCredentials(credentials, masterKey) {
+    const key = await deriveApplicationKey(masterKey, 'apns-vault', { name: 'AES-GCM', length: 256 }, ['encrypt'])
+    const iv = new Uint8Array(12)
+    crypto.getRandomValues(iv)
+    const plaintext = encoder.encode(JSON.stringify({
+        private_key: credentials.apnsPrivateKey,
+        team_id: credentials.apnsTeamID,
+        key_id: credentials.apnsKeyID,
+        topic: credentials.apnsTopic,
+    }))
+    const ciphertext = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: APNS_CREDENTIAL_AAD, tagLength: 128 },
+        key,
+        plaintext,
+    )
+    return { ciphertext: base64Encode(new Uint8Array(ciphertext)), iv: base64Encode(iv) }
+}
+
+async function decryptAPNsCredentials(record, masterKey) {
+    if (!record || Number(record.key_version) !== APNS_CREDENTIAL_KEY_VERSION) {
+        throw new AppError(503, 'APNs configuration unavailable')
+    }
+    try {
+        const iv = base64Decode(record.iv)
+        const ciphertext = base64Decode(record.ciphertext)
+        if (iv.byteLength !== 12 || ciphertext.byteLength < 17 || ciphertext.byteLength > 16384) throw new Error('invalid record')
+        const key = await deriveApplicationKey(masterKey, 'apns-vault', { name: 'AES-GCM', length: 256 }, ['decrypt'])
+        const plaintext = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv, additionalData: APNS_CREDENTIAL_AAD, tagLength: 128 },
+            key,
+            ciphertext,
+        )
+        const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext))
+        return validateAPNsCredentials({
+            apnsPrivateKey: parsed.private_key,
+            apnsTeamID: parsed.team_id,
+            apnsKeyID: parsed.key_id,
+            apnsTopic: parsed.topic,
+        })
+    } catch (error) {
+        if (error instanceof AppError) throw error
+        throw new AppError(503, 'APNs configuration unavailable')
+    }
+}
+
+async function loadAPNsConfig(db, config) {
+    const record = await db.apnsCredentialRecord()
+    if (!record) throw new AppError(503, 'APNs configuration unavailable')
+    return decryptAPNsCredentials(record, config.masterKey)
+}
+
+function parseMasterKey(value) {
+    const encoded = requiredConfigString(value)
+    if (!/^[A-Za-z0-9+/]{43}=$/.test(encoded)) throw new AppError(503, 'configuration unavailable')
+    let bytes
+    try {
+        bytes = base64Decode(encoded)
+    } catch (error) {
+        throw new AppError(503, 'configuration unavailable')
+    }
+    if (bytes.byteLength !== 32 || base64Encode(bytes) !== encoded) {
+        throw new AppError(503, 'configuration unavailable')
+    }
+    return encoded
 }
 
 function requiredConfigString(value) {
@@ -1047,25 +1502,54 @@ function optionalConfigString(value) {
     return value
 }
 
-function authorize(request, config, options = {}) {
+async function authorize(request, env, db, config, options = {}) {
     const required = options.required === true
-    if (!config.basicAuth) {
-        if (required) return { authenticated: false, response: jsonError(503, 'configuration unavailable') }
-        return { authenticated: false, response: null }
-    }
     const header = request.headers.get('authorization')
     if (!header) {
         if (!required) return { authenticated: false, response: null }
         return { authenticated: false, response: unauthorized() }
     }
-    if (!header.startsWith('Basic ') || header.slice(6).length === 0) {
-        return { authenticated: false, response: unauthorized() }
+
+    if (header.startsWith('Basic ') && header.slice(6).length > 0) {
+        const encodedCredentials = header.slice(6)
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedCredentials)) {
+            return { authenticated: false, response: unauthorized() }
+        }
+        let decoded
+        try {
+            const decodedBytes = base64Decode(encodedCredentials)
+            if (base64Encode(decodedBytes) !== encodedCredentials) throw new Error('non-canonical credentials')
+            decoded = new TextDecoder('utf-8', { fatal: true }).decode(decodedBytes)
+        } catch (error) {
+            return { authenticated: false, response: unauthorized() }
+        }
+        const separator = decoded.indexOf(':')
+        if (separator < 1) return { authenticated: false, response: unauthorized() }
+        let username
+        try {
+            username = validateUsername(decoded.slice(0, separator))
+        } catch (error) {
+            return { authenticated: false, response: unauthorized() }
+        }
+        const limited = await enforceRateLimit(
+            env.AUTH_RATE_LIMITER,
+            `basic:${await fingerprint(`${request.headers.get('cf-connecting-ip') || 'unknown'}\u0000${username}`)}`,
+        )
+        if (limited) return { authenticated: false, response: limited }
+        const password = decoded.slice(separator + 1)
+        const user = await db.userByUsername(username)
+        if (!await passwordMatches(password, user, config.masterKey)) {
+            return { authenticated: false, response: unauthorized() }
+        }
+        return { authenticated: true, response: null, user, sessionTokenHash: null }
     }
-    const expected = base64Encode(encoder.encode(config.basicAuth))
-    if (!constantTimeCompare(header.slice(6), expected)) {
-        return { authenticated: false, response: unauthorized() }
+
+    if (header.startsWith('Bearer ') && /^[A-Za-z0-9_-]{40,128}$/.test(header.slice(7))) {
+        const sessionTokenHash = await sha256Base64URL(header.slice(7))
+        const user = await db.authSession(sessionTokenHash)
+        if (user) return { authenticated: true, response: null, user, sessionTokenHash }
     }
-    return { authenticated: true, response: null }
+    return { authenticated: false, response: unauthorized() }
 }
 
 function unauthorized() {
@@ -1231,7 +1715,21 @@ function splitPath(pathname) {
 }
 
 function safeRouteName(pathname) {
-    if (['/', '/ping', '/healthz', '/register', '/info', '/push', '/mcp'].includes(pathname)) return pathname
+    if ([
+        '/',
+        '/ping',
+        '/healthz',
+        '/register',
+        '/info',
+        '/push',
+        '/mcp',
+        '/auth/setup',
+        '/auth/login',
+        '/auth/logout',
+        '/auth/me',
+        '/admin/users',
+        '/admin/apns',
+    ].includes(pathname)) return pathname
     if (pathname.startsWith('/mcp/')) return '/mcp/:device'
     return '/:device'
 }
@@ -1346,6 +1844,18 @@ function constantTimeCompare(left, right) {
         result |= left.charCodeAt(index) ^ right.charCodeAt(index)
     }
     return result === 0
+}
+
+function constantTimeBytes(left, right) {
+    if (!(left instanceof Uint8Array) || !(right instanceof Uint8Array) || left.byteLength !== right.byteLength) return false
+    let result = 0
+    for (let index = 0; index < left.byteLength; index += 1) result |= left[index] ^ right[index]
+    return result === 0
+}
+
+async function sha256Base64URL(value) {
+    const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(value)))
+    return base64URL(new Uint8Array(digest))
 }
 
 async function fingerprint(value) {

@@ -8,14 +8,20 @@ English | **[中文文档](README.zh.md)**
 
 Bark-Worker is a [Bark server](https://github.com/Finb/bark-server) implementation for Cloudflare Workers. It provides a small, self-hosted backend for sending notifications to the [Bark iOS app](https://github.com/Finb/Bark).
 
+Production endpoint: `https://bark.seo9.org`.
+
 > [!IMPORTANT]
-> `main.js` is the default production entrypoint. The checked-in Wrangler configuration and deployment workflow target this D1 version. `main_kv.js` remains a manually deployed KV compatibility entrypoint: it has no MCP support and is not selected by the default deployment path. Common authentication, registration, validation, APNs, and error-handling security behavior is still maintained in both entrypoints.
+> `main.js` is the default production entrypoint. The checked-in Wrangler configuration and deployment workflow target this D1 version. `main_kv.js` is a manually deployed legacy KV entrypoint: it has no D1 user login, encrypted APNs vault, or MCP support and is not selected by the default deployment path.
 
 ## Interfaces
 
 - `GET /ping`: public liveness check.
 - `GET /healthz`: readiness check with no sensitive configuration details.
 - `GET /info`: authenticated service information; device counts are hidden unless `ALLOW_QUERY_NUMS="true"`.
+- `POST /auth/setup`: create the first D1 administrator with the one-time bootstrap token; permanently rejects once a user exists.
+- `POST /auth/login`, `POST /auth/logout`, and `GET /auth/me`: create, revoke, and inspect short-lived Bearer sessions.
+- `POST /admin/users`: administrators add D1 users; passwords are stored only as salted, peppered PBKDF2-SHA256 hashes.
+- `GET/PUT /admin/apns`: administrators inspect or replace AES-256-GCM-encrypted APNs credentials; reads never return the private key or ciphertext.
 - `POST /register`: primary registration interface. It accepts JSON or form fields `device_key` and `device_token`, plus the legacy aliases `key` and `devicetoken`.
 - `POST /push`: JSON or form push interface, including bounded batch pushes.
 - Path-style Bark push: existing GET and POST paths remain supported for client compatibility.
@@ -25,15 +31,14 @@ Batch mode takes precedence when a non-empty `device_keys` value is supplied. Th
 
 ## Secure defaults
 
-The repository configuration defaults to `SECURITY_MODE="strict"`. In strict mode, registration, push, MCP, and `/info` require HTTP Basic authentication. `/ping` remains public. A missing `BASIC_AUTH` fails closed: protected routes and readiness return a configuration error instead of allowing anonymous access.
+The repository configuration defaults to `SECURITY_MODE="strict"`. In strict mode, registration, push, MCP, and `/info` require authentication, while `/ping` remains public. Existing clients can keep using HTTP Basic, but credentials are now verified against D1 users; Bearer sessions returned by login are also accepted. The D1 entrypoint no longer reads a `BASIC_AUTH` environment variable.
 
 Runtime credentials are Cloudflare Secrets, never Wrangler `vars` or source constants:
 
-- `BASIC_AUTH`
-- `APNS_PRIVATE_KEY`
-- `APNS_TEAM_ID`
-- `APNS_KEY_ID`
-- `APNS_TOPIC`
+- `APP_MASTER_KEY`: canonical Base64 for 32 random bytes, used to derive the password pepper and APNs AES-GCM key.
+- `ADMIN_BOOTSTRAP_TOKEN`: an at-least-32-byte one-time first-administrator setup token.
+
+User records, login-token hashes, and APNs ciphertext live in D1. Passwords are irreversible. The APNs key must be decrypted, so `APP_MASTER_KEY` stays only in a Cloudflare Secret and must also be backed up in an independent secret manager. Storing that root key beside the ciphertext in D1 would provide no protection.
 
 Only the lowercase strings `"true"` and `"false"` are accepted for boolean configuration. A misspelling such as `"False"` is a configuration error. `SECURITY_MODE="compat"` is an explicit, temporary migration mode; it is not the recommended production default and never disables MCP authentication.
 
@@ -42,7 +47,7 @@ The primary registration method is `POST /register`. Legacy GET registration is 
 Existing-key behavior is deliberately conservative:
 
 - The same key and token is an idempotent success.
-- A different token requires valid Basic Auth.
+- A different token requires valid D1 user authentication (Basic or Bearer).
 - An unauthenticated rebind is rejected with HTTP 409.
 - `ALLOW_INSECURE_DEVICE_REBIND="true"` is a migration-only escape hatch valid only with `SECURITY_MODE="compat"`; keep it off unless a bounded, monitored migration requires it.
 
@@ -56,15 +61,15 @@ Existing-key behavior is deliberately conservative:
 | Concurrent APNs calls | 5 (`BATCH_CONCURRENCY="5"`) |
 | APNs timeout | 10 seconds (`APNS_TIMEOUT_MS="10000"`, valid range 1–30 seconds) |
 
-The four Cloudflare Rate Limiting bindings are `REGISTER_RATE_LIMITER` (5/60 seconds), `PUSH_RATE_LIMITER` (60/60 seconds), `BATCH_RATE_LIMITER` (10/60 seconds), and `MCP_RATE_LIMITER` (60/60 seconds). Their counters are data-center-local and eventually consistent, so they are an abuse-control layer—not an exact global quota or a replacement for the synchronous body, batch, concurrency, and APNs payload limits.
+The five Cloudflare Rate Limiting bindings are `REGISTER_RATE_LIMITER` (5/60 seconds), `PUSH_RATE_LIMITER` (60/60 seconds), `BATCH_RATE_LIMITER` (10/60 seconds), `MCP_RATE_LIMITER` (60/60 seconds), and `AUTH_RATE_LIMITER` (60/60 seconds per IP/user for D1 Basic verification). Their counters are data-center-local and eventually consistent, so they are an abuse-control layer—not an exact global quota or a replacement for the synchronous body, batch, concurrency, and APNs payload limits.
 
 ## Storage and lifecycle
 
 D1 migrations in `migrations/` are the authoritative production schema history and must be applied before deploying code that depends on them. Awaited AutoMigrate is an idempotent fallback for first-run or manually copied deployments; it does not replace migration records. D1-backed routes return HTTP 503 when schema readiness fails.
 
-Expired MCP sessions are cleaned by the D1 entrypoint's scheduled handler at `0 * * * *`—once per hour in UTC. HTTP requests do not run session cleanup.
+Expired MCP and login sessions are cleaned by the D1 entrypoint's scheduled handler at `0 * * * *`—once per hour in UTC. HTTP requests do not run session cleanup.
 
-APNs requests are limited to 4096 payload bytes and have an explicit timeout. Timeouts map to HTTP 504, network failures to 502, and APNs 5xx responses to 503; throttling preserves 429 and `Retry-After`. Retryable failures are marked, but the Worker does not synchronously retry a notification because that can create duplicates. Any APNs signing key previously exposed in source or history must be revoked and rotated in Apple Developer; deleting it from a file is not remediation.
+The complete APNs credential set is stored as one AES-256-GCM D1 record. The Worker decrypts it only for pushes, while provider JWTs remain isolate-memory-only. Missing or undecryptable credentials fail pushes with HTTP 503. Any APNs signing key previously exposed in source or history must be revoked and rotated in Apple Developer; never place that old key into the vault.
 
 ## Deployment
 

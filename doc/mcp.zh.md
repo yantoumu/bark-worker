@@ -35,9 +35,9 @@ MCP-Protocol-Version: 2025-06-18
 
 ## 认证
 
-MCP 始终要求 HTTP Basic 认证，即使 `SECURITY_MODE="compat"` 允许部分旧 Bark 行为。应把准确凭据对保存为 Cloudflare Secret `BASIC_AUTH`，绝不能放在 Wrangler `vars` 或源码中。
+MCP 始终要求认证，即使 `SECURITY_MODE="compat"` 允许部分旧 Bark 行为。可使用 D1 用户的 HTTP Basic 凭据，或 `/auth/login` 返回的 Bearer 会话；D1 入口不再读取 `BASIC_AUTH` Secret。
 
-- 缺少 required `BASIC_AUTH`：HTTP 503 配置故障。
+- 缺少 `APP_MASTER_KEY` 或 `ADMIN_BOOTSTRAP_TOKEN`：HTTP 503 配置故障。
 - 客户端凭据缺失、畸形或错误：HTTP 401，并带 `WWW-Authenticate` 和 `Cache-Control: no-store`。
 - Session ID 不能替代 Basic Auth；每个 MCP 请求仍需认证。
 

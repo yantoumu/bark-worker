@@ -256,7 +256,7 @@ test('MCP remains authenticated even when legacy push compatibility is enabled',
         params: { protocolVersion: '2025-06-18', capabilities: {} },
     }, env, { auth: false, headers: { origin: 'https://client.example' } })
 
-    assert.equal(response.status, 503)
+    assert.equal(response.status, 401)
 })
 
 test('GET /mcp returns 405 because SSE is not implemented', async () => {

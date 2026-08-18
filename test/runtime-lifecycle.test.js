@@ -93,7 +93,7 @@ test('AutoMigrate DDL runs at most once per D1 binding', async () => {
     }
 })
 
-test('AutoMigrate keeps the five-column sessions schema additive and remains compatible with migrations 001-004', async (t) => {
+test('AutoMigrate stays additive and remains compatible with migrations 001-005', async (t) => {
     const now = Math.floor(Date.now() / 1000)
     const existingSession = {
         id: 'legacy-session-id',
@@ -130,21 +130,30 @@ test('AutoMigrate keeps the five-column sessions schema additive and remains com
         '002_create_devices.sql',
         '003_create_session.sql',
         '004_add_session_indexes.sql',
+        '005_create_auth_vault.sql',
     ]) {
         sqlite.exec(await readFile(new URL(`../migrations/${filename}`, import.meta.url), 'utf8'))
     }
 
     const sessionColumns = sqlite.prepare('PRAGMA table_info(`sessions`)').all().map(({ name }) => name)
     assert.deepEqual(sessionColumns, ['id', 'device_key', 'initialized', 'created_at', 'last_seen'])
+    assert.deepEqual(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'auth_sessions', 'apns_credentials') ORDER BY name").all().map(({ name }) => name),
+        ['apns_credentials', 'auth_sessions', 'users'],
+    )
 })
 
-test('scheduled handler performs session cleanup as two indexable DELETE statements', async () => {
+test('scheduled handler performs indexed MCP and auth-session cleanup', async () => {
     assert.equal(typeof worker.scheduled, 'function', 'module worker must export scheduled()')
     const now = Math.floor(Date.now() / 1000)
     const database = new FakeD1Database({
         sessions: [
             ['idle', { id: 'idle', device_key: null, initialized: 1, created_at: now, last_seen: now - 4000 }],
             ['old', { id: 'old', device_key: null, initialized: 1, created_at: now - 90000, last_seen: now }],
+        ],
+        authSessions: [
+            ['expired-auth', { token_hash: 'expired-auth', username: 'admin', created_at: now - 90000, expires_at: now - 1 }],
+            ['active-auth', { token_hash: 'active-auth', username: 'admin', created_at: now, expires_at: now + 3600 }],
         ],
     })
     const env = await createTestEnv({ database })
@@ -158,6 +167,11 @@ test('scheduled handler performs session cleanup as two indexable DELETE stateme
     assert.ok(deletes.every((call) => !/\bor\b/i.test(call.query)))
     assert.ok(deletes.some((call) => /last_seen/i.test(call.query)))
     assert.ok(deletes.some((call) => /created_at/i.test(call.query)))
+    const authDeletes = database.callsMatching(/delete from `auth_sessions`/i)
+    assert.equal(authDeletes.length, 1)
+    assert.match(authDeletes[0].query, /expires_at/i)
+    assert.equal(database.authSessions.has('expired-auth'), false)
+    assert.equal(database.authSessions.has('active-auth'), true)
 })
 
 test('D1 and KV production entrypoints contain no embedded private-key material', async () => {

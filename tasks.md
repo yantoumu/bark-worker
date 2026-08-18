@@ -1,10 +1,28 @@
 # bark-worker 安全加固与可靠性修复计划
 
-> 状态：本地实现、测试与 CI 配置已完成；整体上线验收仍为 **NOT DEPLOYED**。
+> 状态：生产核心服务已部署；D1 登录可用，APNs 新 Key 轮换与真机 canary 仍为 **BLOCKED**。
 >
 > 执行策略：systematic / security-first / backward-compatible。
 >
 > 当前生产入口：`main.js`（D1）；`main_kv.js` 是仍被文档承诺的手工 KV 兼容版本。
+
+## 2026-08-18：D1 用户认证与 APNs 加密保险库增量
+
+本增量替代 D1 入口的 `BASIC_AUTH` 和 APNs 明文 Secret 合同；旧 KV 入口保持手工兼容，不宣称功能等价。
+
+- [x] `users` 仅保存独立盐、100000 次 PBKDF2-SHA256 哈希和 Secret 派生 pepper；密码不可逆。
+- [x] `auth_sessions` 仅保存随机 Bearer token 的 SHA-256 哈希，并由 Cron 按 `expires_at` 索引清理。
+- [x] `POST /auth/setup` 使用独立引导令牌和原子一次性 SQL 创建首个管理员。
+- [x] `POST /auth/login`、`POST /auth/logout`、`GET /auth/me` 与 `POST /admin/users` 已实现角色边界。
+- [x] D1 Basic Auth 兼容现有客户端，但校验来源改为 `users`，不再读取 `BASIC_AUTH` 环境变量。
+- [x] APNs 完整凭据以 AES-256-GCM 单记录保存，根密钥只来自 `APP_MASTER_KEY` Cloudflare Secret。
+- [x] `GET/PUT /admin/apns` 只向管理员开放，读取永不返回私钥或密文。
+- [x] `migrations/005_create_auth_vault.sql` 与可等待 AutoMigrate 都只做 additive 建表/索引。
+- [x] 未配置或无法解密 APNs 凭据时 fail closed，且不会联系 Apple。
+- [x] 明确首次 APNs seed 的 D1 回滚边界：canary 失败时由管理员显式 `PUT /admin/apns` 修复，禁止自动恢复泄漏 Key 或隐式覆盖已有记录。
+- [x] 在目标 Cloudflare D1 完成加密备份/解密一致性校验后应用 001–005；migration ledger 再查为 `No migrations to apply`。
+- [x] 部署 `bark-worker` 到 `https://bark.seo9.org`，创建首个管理员并验证登录、D1 Basic、Bearer、登出失效和 APNs 元数据接口。
+- [ ] 使用已撤销泄漏旧 Key 后新创建的 APNs Key 写入保险库并完成真机 canary。
 
 ### 权威执行状态（2026-08-18）
 
@@ -13,18 +31,18 @@
 | 范围 | 状态 | 本地证据 | 尚未满足的门禁 |
 | --- | --- | --- | --- |
 | Phase 0：APNs Key 事故响应 | **BLOCKED** | 仓库扫描未发现嵌入式私钥或 APNs 凭据 | 尚未确认 Apple Team/旧 Key 状态，未撤销轮换，未完成真实 APNs canary |
-| Phase 1–10：代码、测试、配置、CI 与文档 | **DONE（本地实现）** | 28 个 JavaScript 文件语法通过；D1/KV 两轮各 218 项测试全通过；toolchain 合同 10/10 通过 | 尚缺下列 staging/production 外部证据 |
-| 完整 `npm run verify` | **DONE** | exit 0；D1 line/branch/functions 93.14%/84.03%/93.07%，KV 89.55%/77.01%/96.39%；Wrangler dry-run 通过 | 仅证明本地测试与构建，不代表远程部署成功 |
-| 本地 D1 migration | **DONE** | 001–004 首次应用成功；第二次执行返回 `No migrations to apply` | 未使用 production 导出副本做本地升级演练 |
-| 配置与 CI 安全合同 | **DONE（本地）** | secret scan、YAML 解析、备份 AES-256-GCM 往返/篡改拒绝、Worker version UUID fixture、production/staging 渲染与 Wrangler dry-run 均通过 | Cloudflare 账号内 Rate Limit namespace 仍需人工预留并确认全局唯一 |
+| Phase 1–10：代码、测试、配置、CI 与文档 | **DONE** | 29 个 JavaScript 文件语法通过；D1/KV 两轮各 230 项测试全通过；toolchain 合同 12/12 通过 | APNs 真机链路仍受 Phase 0 阻断 |
+| 完整 `npm run verify` | **DONE** | exit 0；D1 line/branch/functions 93.77%/80.83%/94.62%，KV 89.55%/77.01%/96.39%；Wrangler dry-run 通过 | 本地门禁不替代下列真实线上证据 |
+| Production D1 migration | **DONE** | 生产导出经 AES-256-GCM 加密后解密逐字节一致；001–005 远端应用成功，再查无待应用 migration；原 3 个设备记录未丢失 | 加密备份需与 Keychain 内独立备份密钥一同保管 |
+| 配置与 CI 安全合同 | **DONE** | secret scan、YAML 解析、备份 AES-256-GCM 往返/篡改拒绝、Worker version UUID fixture、production/staging 渲染与 Wrangler dry-run 均通过；账号扫描确认 production namespace 3001–3005 不碰撞 | GitHub Environment 与 staging 的独立 namespace/Secrets 尚未配置 |
 | Staging | **NOT RUN** | 仅完成 workflow 门禁和本地 staging dry-run | 未执行远程 migration/deploy/smoke，未连续观察一个真实 UTC Cron 周期 |
-| Production | **NOT RUN** | 仅完成审批门禁、加密备份、secret-name 检查、旧版本记录及 smoke 失败 Worker rollback 配置 | 未执行远程备份/恢复演练、migration、deploy、smoke、日志检查或回滚 |
+| Production | **CORE LIVE / APNs BLOCKED** | `https://bark.seo9.org`；Worker version `7c4ac7f6-4aee-4ef3-b8b3-fa3594488df2`；HTTPS ping/health 200、未认证 401、setup 201/409、Bearer/Basic 200、logout 后 401；D1 用户仅存 PBKDF2 元数据，旧 authorization 缓存已清空 | APNs vault 明确为 `configured=false`；尚缺新 Key、真实推送 canary、Cron 周期观察与 staging |
 
 ### 集中上线阻断
 
 1. 在 Apple Developer 完成旧 APNs Key 状态确认、撤销、轮换和受控真机 canary；旧 Key 不得作为回滚手段。
-2. 在 Cloudflare 账户内为 staging/production 各预留四个不重叠且全局唯一的 Rate Limit namespace ID，并配置受保护的 GitHub Variables、Secrets 与 Environment 审批。
-3. 依次完成 staging migration/deploy/smoke、至少一个 UTC Cron 周期观察，再审批 production 加密备份/恢复演练、migration/deploy/smoke；本地测试与 dry-run 不能替代这些证据。
+2. 为 staging 预留与 production 3001–3005 不重叠的五个 Rate Limit namespace，并配置受保护的 GitHub Variables、Secrets 与 Environment 审批。
+3. 完成 staging migration/deploy/smoke，并观察至少一个真实 UTC Cron 周期；production 核心登录链路已上线，但不能据此声称 APNs 推送已完成。
 
 ## 1. 目标与完成定义
 

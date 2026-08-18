@@ -81,6 +81,50 @@ test('Cloudflare credentials use secrets while the D1 identifier uses a variable
     assert.doesNotMatch(workflow, /wrangler\s+d1\s+create/i)
 })
 
+test('production owns bark.seo9.org while rendered staging cannot claim it', async () => {
+    const suffix = `${process.pid}-${Date.now()}`
+    const productionPath = `.wrangler/domain-production-${suffix}.jsonc`
+    const stagingPath = `.wrangler/domain-staging-${suffix}.jsonc`
+    const renderer = fileURLToPath(new URL('../.github/scripts/render-wrangler-config.mjs', import.meta.url))
+    const root = fileURLToPath(new URL('..', import.meta.url))
+    const databaseId = '11111111-1111-4111-8111-111111111111'
+    try {
+        const production = spawnSync(process.execPath, [renderer], {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+                ...process.env,
+                D1_DATABASE_ID: databaseId,
+                RATE_LIMIT_NAMESPACE_BASE: '3000',
+                WRANGLER_OUTPUT_CONFIG: productionPath,
+            },
+        })
+        assert.equal(production.status, 0, production.stderr || production.stdout)
+
+        const staging = spawnSync(process.execPath, [renderer], {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+                ...process.env,
+                D1_DATABASE_ID: databaseId,
+                RATE_LIMIT_NAMESPACE_BASE: '4000',
+                PRODUCTION_RATE_LIMIT_NAMESPACE_BASE: '3000',
+                WORKER_NAME: 'bark-worker-staging',
+                WRANGLER_OUTPUT_CONFIG: stagingPath,
+            },
+        })
+        assert.equal(staging.status, 0, staging.stderr || staging.stdout)
+
+        const productionConfig = JSON.parse(await readFile(join(root, productionPath), 'utf8'))
+        const stagingConfig = JSON.parse(await readFile(join(root, stagingPath), 'utf8'))
+        assert.deepEqual(productionConfig.routes, [{ pattern: 'bark.seo9.org', custom_domain: true }])
+        assert.equal('routes' in stagingConfig, false)
+    } finally {
+        await rm(join(root, productionPath), { force: true })
+        await rm(join(root, stagingPath), { force: true })
+    }
+})
+
 test('production workflow verifies and backs up before migration, then deploys before smoke', async () => {
     const workflow = await readFile(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8')
     const productionStart = workflow.search(/^  deploy-production:\s*$/m)
@@ -130,6 +174,19 @@ test('production smoke DELETE sends the MCP protocol version negotiated by initi
         new RegExp(`${header[1]}\\s*=\\s*initializePayload(?:\\?\\.)?\\.result(?:\\?\\.)?\\.protocolVersion`),
         'cleanup protocol header must come from the initialize response',
     )
+})
+
+test('deployment smoke verifies the encrypted APNs vault before its canary and only seeds an empty vault', async () => {
+    const smoke = await readFile(new URL('../.github/scripts/smoke.mjs', import.meta.url), 'utf8')
+    const readiness = smoke.indexOf("'encrypted D1 APNs vault readiness'")
+    const seed = smoke.indexOf("'encrypted D1 APNs vault seed'")
+    const canary = smoke.indexOf("'single-device APNs canary'")
+
+    assert.ok(readiness >= 0, 'APNs vault readiness check is missing')
+    assert.ok(seed > readiness, 'first-time APNs vault seed must follow the readiness check')
+    assert.ok(canary > seed, 'APNs canary must follow vault readiness and optional seed')
+    assert.match(smoke, /configured\s*!==\s*true\s*&&\s*apnsValues\.every\(Boolean\)/)
+    assert.match(smoke, /APNs vault is not configured/)
 })
 
 test('secret scanner rejects tracked non-example environment files', async (t) => {

@@ -35,9 +35,9 @@ All examples below use only generic `/mcp` and redacted placeholders. They delib
 
 ## Authentication
 
-MCP always requires HTTP Basic authentication, including when `SECURITY_MODE="compat"` permits selected legacy Bark behavior. Store the exact credential pair in the Cloudflare Secret `BASIC_AUTH`; never in Wrangler `vars` or source code.
+MCP always requires authentication, including when `SECURITY_MODE="compat"` permits selected legacy Bark behavior. Use either D1-user HTTP Basic credentials or a Bearer session returned by `/auth/login`; the D1 entrypoint no longer reads a `BASIC_AUTH` Secret.
 
-- Missing required `BASIC_AUTH`: HTTP 503 configuration failure.
+- Missing `APP_MASTER_KEY` or `ADMIN_BOOTSTRAP_TOKEN`: HTTP 503 configuration failure.
 - Missing, malformed, or wrong client credentials: HTTP 401 with `WWW-Authenticate` and `Cache-Control: no-store`.
 - A session ID does not replace Basic Auth; every MCP request remains authenticated.
 

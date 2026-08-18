@@ -170,6 +170,78 @@ test('MCP initialize rejects supplied session IDs while rate limiting a fixed au
     assert.doesNotMatch(String(limiter.calls[0].key), /attacker-selected-session/)
 })
 
+test('D1 Basic authentication is rate limited before user lookup and password KDF', async () => {
+    const limiter = new FakeRateLimiter([{ success: false }])
+    const database = new FakeD1Database()
+    const env = await createTestEnv({ database, AUTH_RATE_LIMITER: limiter })
+
+    const { response } = await invokeWorker(worker, '/info', {
+        env,
+        request: {
+            method: 'GET',
+            headers: authenticatedHeaders({ 'cf-connecting-ip': '192.0.2.55' }),
+        },
+    })
+
+    assert.equal(response.status, 429)
+    assert.equal(limiter.calls.length, 1)
+    assert.equal(database.callsMatching(/from `users`/i).length, 0)
+    assert.doesNotMatch(String(limiter.calls[0].key), /admin|password|192\.0\.2\.55/i)
+})
+
+test('D1 Basic authentication fails closed when its limiter is unavailable', async () => {
+    const database = new FakeD1Database()
+    const env = await createTestEnv({ database, AUTH_RATE_LIMITER: undefined })
+
+    const { response } = await invokeWorker(worker, '/info', {
+        env,
+        request: { method: 'GET', headers: authenticatedHeaders() },
+    })
+
+    assert.equal(response.status, 503)
+    assert.equal(database.callsMatching(/from `users`/i).length, 0)
+})
+
+test('D1 JSON login uses the auth limiter before user lookup and fails closed without it', async () => {
+    const rejectedLimiter = new FakeRateLimiter([{ success: false }])
+    const rejectedDatabase = new FakeD1Database()
+    const rejectedEnv = await createTestEnv({
+        database: rejectedDatabase,
+        AUTH_RATE_LIMITER: rejectedLimiter,
+    })
+    const loginRequest = {
+        method: 'POST',
+        headers: {
+            'content-type': 'application/json',
+            'cf-connecting-ip': '192.0.2.56',
+        },
+        body: JSON.stringify({ username: 'admin', password: 'correct horse battery staple' }),
+    }
+
+    const rejected = await invokeWorker(worker, '/auth/login', {
+        env: rejectedEnv,
+        request: loginRequest,
+    })
+
+    assert.equal(rejected.response.status, 429)
+    assert.equal(rejectedLimiter.calls.length, 1)
+    assert.equal(rejectedDatabase.callsMatching(/from `users`/i).length, 0)
+    assert.doesNotMatch(String(rejectedLimiter.calls[0].key), /admin|password|192\.0\.2\.56/i)
+
+    const unavailableDatabase = new FakeD1Database()
+    const unavailableEnv = await createTestEnv({
+        database: unavailableDatabase,
+        AUTH_RATE_LIMITER: undefined,
+    })
+    const unavailable = await invokeWorker(worker, '/auth/login', {
+        env: unavailableEnv,
+        request: loginRequest,
+    })
+
+    assert.equal(unavailable.response.status, 503)
+    assert.equal(unavailableDatabase.callsMatching(/from `users`/i).length, 0)
+})
+
 for (const implementation of implementations) {
     test(`${implementation.name}: missing route rate-limit bindings fail closed before storage or APNs`, async (t) => {
         const cases = [

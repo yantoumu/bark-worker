@@ -54,11 +54,8 @@ jobs:
       - name: Run project verification
         run: npm run verify
         env:
-          BASIC_AUTH: "ci-user:ci-password"
-          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
-          APNS_TEAM_ID: "ci-placeholder-team"
-          APNS_KEY_ID: "ci-placeholder-key"
-          APNS_TOPIC: "ci.example.bark"
+          APP_MASTER_KEY: "ci-placeholder-master-key-not-for-runtime"
+          ADMIN_BOOTSTRAP_TOKEN: "ci-bootstrap-token-with-at-least-32-bytes"
 
       - name: Validate production config rendering
         run: node .github/scripts/render-wrangler-config.mjs
@@ -73,11 +70,8 @@ jobs:
           --config "$WRANGLER_CONFIG"
           --outdir .wrangler/dry-run-production-config
         env:
-          BASIC_AUTH: "ci-user:ci-password"
-          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
-          APNS_TEAM_ID: "ci-placeholder-team"
-          APNS_KEY_ID: "ci-placeholder-key"
-          APNS_TOPIC: "ci.example.bark"
+          APP_MASTER_KEY: "ci-placeholder-master-key-not-for-runtime"
+          ADMIN_BOOTSTRAP_TOKEN: "ci-bootstrap-token-with-at-least-32-bytes"
 
   deploy-staging:
     name: Migrate, deploy, and smoke staging
@@ -123,6 +117,7 @@ jobs:
           require_value "PRODUCTION_RATE_LIMIT_NAMESPACE_BASE variable" "$PRODUCTION_RATE_LIMIT_NAMESPACE_BASE"
           require_value "STAGING_SMOKE_URL variable" "$SMOKE_BASE_URL"
           require_value "BARK_SMOKE_BASIC_AUTH secret" "$SMOKE_BASIC_AUTH"
+          require_value "BARK_ADMIN_BOOTSTRAP_TOKEN secret" "$SMOKE_BOOTSTRAP_TOKEN"
           require_value "BARK_SMOKE_DEVICE_KEY secret" "$SMOKE_DEVICE_KEY"
           require_value "BARK_SMOKE_DEVICE_TOKEN secret" "$SMOKE_DEVICE_TOKEN"
           exit "$missing"
@@ -135,8 +130,13 @@ jobs:
           PRODUCTION_RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
           SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_URL }}
           SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_BOOTSTRAP_TOKEN: ${{ secrets.BARK_ADMIN_BOOTSTRAP_TOKEN }}
           SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
           SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+          SMOKE_APNS_PRIVATE_KEY: ${{ secrets.BARK_APNS_PRIVATE_KEY }}
+          SMOKE_APNS_TEAM_ID: ${{ secrets.BARK_APNS_TEAM_ID }}
+          SMOKE_APNS_KEY_ID: ${{ secrets.BARK_APNS_KEY_ID }}
+          SMOKE_APNS_TOPIC: ${{ secrets.BARK_APNS_TOPIC }}
 
       - name: Render staging Wrangler config
         run: node .github/scripts/render-wrangler-config.mjs
@@ -155,11 +155,8 @@ jobs:
           --config "$STAGING_WRANGLER_CONFIG"
           --outdir .wrangler/dry-run-staging-bundle
         env:
-          BASIC_AUTH: "ci-user:ci-password"
-          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
-          APNS_TEAM_ID: "ci-placeholder-team"
-          APNS_KEY_ID: "ci-placeholder-key"
-          APNS_TOPIC: "ci.example.bark"
+          APP_MASTER_KEY: "ci-placeholder-master-key-not-for-runtime"
+          ADMIN_BOOTSTRAP_TOKEN: "ci-bootstrap-token-with-at-least-32-bytes"
 
       - name: Verify staging Worker secret names
         shell: bash
@@ -199,8 +196,13 @@ jobs:
         env:
           SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_URL }}
           SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_BOOTSTRAP_TOKEN: ${{ secrets.BARK_ADMIN_BOOTSTRAP_TOKEN }}
           SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
           SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+          SMOKE_APNS_PRIVATE_KEY: ${{ secrets.BARK_APNS_PRIVATE_KEY }}
+          SMOKE_APNS_TEAM_ID: ${{ secrets.BARK_APNS_TEAM_ID }}
+          SMOKE_APNS_KEY_ID: ${{ secrets.BARK_APNS_KEY_ID }}
+          SMOKE_APNS_TOPIC: ${{ secrets.BARK_APNS_TOPIC }}
 
   deploy-production:
     name: Migrate, deploy, and smoke production
@@ -247,6 +249,7 @@ jobs:
           require_value "PRODUCTION_RATE_LIMIT_NAMESPACE_BASE variable" "$RATE_LIMIT_NAMESPACE_BASE"
           require_value "PRODUCTION_SMOKE_URL variable" "$SMOKE_BASE_URL"
           require_value "BARK_SMOKE_BASIC_AUTH secret" "$SMOKE_BASIC_AUTH"
+          require_value "BARK_ADMIN_BOOTSTRAP_TOKEN secret" "$SMOKE_BOOTSTRAP_TOKEN"
           require_value "BARK_SMOKE_DEVICE_KEY secret" "$SMOKE_DEVICE_KEY"
           require_value "BARK_SMOKE_DEVICE_TOKEN secret" "$SMOKE_DEVICE_TOKEN"
           require_value "D1_BACKUP_ENCRYPTION_KEY secret" "$D1_BACKUP_ENCRYPTION_KEY"
@@ -259,6 +262,7 @@ jobs:
           RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
           SMOKE_BASE_URL: ${{ vars.PRODUCTION_SMOKE_URL }}
           SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_BOOTSTRAP_TOKEN: ${{ secrets.BARK_ADMIN_BOOTSTRAP_TOKEN }}
           SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
           SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
           D1_BACKUP_ENCRYPTION_KEY: ${{ secrets.D1_BACKUP_ENCRYPTION_KEY }}
@@ -277,11 +281,8 @@ jobs:
           --config "$WRANGLER_CONFIG"
           --outdir .wrangler/dry-run-production-bundle
         env:
-          BASIC_AUTH: "ci-user:ci-password"
-          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
-          APNS_TEAM_ID: "ci-placeholder-team"
-          APNS_KEY_ID: "ci-placeholder-key"
-          APNS_TOPIC: "ci.example.bark"
+          APP_MASTER_KEY: "ci-placeholder-master-key-not-for-runtime"
+          ADMIN_BOOTSTRAP_TOKEN: "ci-bootstrap-token-with-at-least-32-bytes"
 
       - name: Verify production Worker secret names
         shell: bash
@@ -384,8 +385,13 @@ jobs:
         env:
           SMOKE_BASE_URL: ${{ vars.PRODUCTION_SMOKE_URL }}
           SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_BOOTSTRAP_TOKEN: ${{ secrets.BARK_ADMIN_BOOTSTRAP_TOKEN }}
           SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
           SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+          SMOKE_APNS_PRIVATE_KEY: ${{ secrets.BARK_APNS_PRIVATE_KEY }}
+          SMOKE_APNS_TEAM_ID: ${{ secrets.BARK_APNS_TEAM_ID }}
+          SMOKE_APNS_KEY_ID: ${{ secrets.BARK_APNS_KEY_ID }}
+          SMOKE_APNS_TOPIC: ${{ secrets.BARK_APNS_TOPIC }}
 
       - name: Roll back production Worker after smoke failure
         if: ${{ failure() && steps.production_deploy.outcome == 'success' && steps.production_smoke.outcome == 'failure' }}

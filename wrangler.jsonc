@@ -10,10 +10,16 @@
         "enabled": true
     },
     "keep_vars": false,
+    "routes": [
+        {
+            "pattern": "bark.seo9.org",
+            "custom_domain": true
+        }
+    ],
     "d1_databases": [
         {
             "binding": "database",
-            "database_name": "database-bark",
+            "database_name": "barks",
             "database_id": "00000000-0000-0000-0000-000000000000",
             "migrations_dir": "migrations"
         }
@@ -50,6 +56,14 @@
                 "limit": 60,
                 "period": 60
             }
+        },
+        {
+            "name": "AUTH_RATE_LIMITER",
+            "namespace_id": "1005",
+            "simple": {
+                "limit": 60,
+                "period": 60
+            }
         }
     ],
     "triggers": {
@@ -59,11 +73,8 @@
     },
     "secrets": {
         "required": [
-            "BASIC_AUTH",
-            "APNS_PRIVATE_KEY",
-            "APNS_TEAM_ID",
-            "APNS_KEY_ID",
-            "APNS_TOPIC"
+            "APP_MASTER_KEY",
+            "ADMIN_BOOTSTRAP_TOKEN"
         ]
     },
     "vars": {
