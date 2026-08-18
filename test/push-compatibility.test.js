@@ -2,80 +2,32 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import worker from '../main.js'
-
-class FakeD1Database {
-    exec() {}
-
-    prepare(query) {
-        return {
-            bind: (...bindings) => ({
-                run: async () => this.run(query, bindings),
-            }),
-            run: async () => this.run(query, []),
-        }
-    }
-
-    async run(query) {
-        if (query.includes('SELECT `token` FROM `devices`')) {
-            return { results: [{ token: 'test-device-token' }] }
-        }
-
-        if (query.includes('SELECT `token`, `time` FROM `authorization`')) {
-            return {
-                results: [{
-                    token: 'test-authorization-token',
-                    time: String(Math.floor(Date.now() / 1000)),
-                }],
-            }
-        }
-
-        return { results: [] }
-    }
-}
-
-function createWorkerContext() {
-    const pending = []
-
-    return {
-        context: {
-            waitUntil(promise) {
-                pending.push(promise)
-            },
-        },
-        async settle() {
-            await Promise.all(pending)
-        },
-    }
-}
+import { createAPNsStub } from './helpers/apns.js'
+import { FakeD1Database } from './helpers/fake-d1.js'
+import { authenticatedHeaders, createTestEnv } from './helpers/worker-harness.js'
+import { createWorkerContext } from './helpers/worker-context.js'
 
 async function push(payload) {
-    const apnsRequests = []
+    const apns = createAPNsStub()
     const originalFetch = globalThis.fetch
 
-    globalThis.fetch = async (url, init) => {
-        apnsRequests.push({ url, init })
-        return new Response(null, { status: 200 })
-    }
+    globalThis.fetch = apns.fetch
 
     try {
         const { context, settle } = createWorkerContext()
+        const env = await createTestEnv({ database: new FakeD1Database() })
         const response = await worker.fetch(new Request('https://worker.example/push', {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: authenticatedHeaders({ 'content-type': 'application/json' }),
             body: JSON.stringify(payload),
-        }), {
-            database: new FakeD1Database(),
-            ALLOW_NEW_DEVICE: 'false',
-            ALLOW_QUERY_NUMS: 'false',
-            ROOT_PATH: '/',
-        }, context)
+        }), env, context)
 
         await settle()
 
         assert.equal(response.status, 200)
-        assert.equal(apnsRequests.length, 1)
+        assert.equal(apns.requests.length, 1)
 
-        return JSON.parse(apnsRequests[0].init.body)
+        return apns.payload()
     } finally {
         globalThis.fetch = originalFetch
     }
@@ -83,12 +35,8 @@ async function push(payload) {
 
 test('GET /ping remains compatible with the client health check', async () => {
     const { context, settle } = createWorkerContext()
-    const response = await worker.fetch(new Request('https://worker.example/ping'), {
-        database: new FakeD1Database(),
-        ALLOW_NEW_DEVICE: 'false',
-        ALLOW_QUERY_NUMS: 'false',
-        ROOT_PATH: '/',
-    }, context)
+    const env = await createTestEnv({ database: new FakeD1Database() })
+    const response = await worker.fetch(new Request('https://worker.example/ping'), env, context)
 
     await settle()
 

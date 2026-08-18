@@ -1,4 +1,11 @@
-.wrangler
-.vscode
-node_modules
+.wrangler/
+.vscode/
+node_modules/
+coverage/
+.backups/
+.dev.vars*
+!.dev.vars.example
+.env*
+*.pem
+*.key
 .DS_Store

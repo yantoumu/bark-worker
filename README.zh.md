@@ -6,71 +6,68 @@
 
 **[English](README.md)** | 中文文档
 
-<!-- > [!CAUTION]
-> Cloudflare Dashboard 目前(2024-07-27)存在Bug, 部署和变量编辑不可用, 在Cloudflare修复该问题之前请勿进行任何操作, 如果需要部署请使用wrangler. -->
+Bark-Worker 是运行在 Cloudflare Workers 上的 [Bark 服务端](https://github.com/Finb/bark-server)实现，为 [Bark iOS App](https://github.com/Finb/Bark) 提供轻量、自托管的通知后端。
 
-<!-- > [!NOTE]
-> Device token可能发生变化, 之前使用多Key或Key别名的方法可能会失效, 如有多Key使用需要参考[Tips](doc/tips.zh.md). -->
+> [!IMPORTANT]
+> `main.js` 是默认生产入口。仓库内的 Wrangler 配置和部署工作流都以这个 D1 版本为目标。`main_kv.js` 仍是需要手工部署的 KV 兼容入口：它不支持 MCP，也不会被默认部署路径选中。两个入口仍共同维护认证、注册、校验、APNs 和错误处理等通用安全行为。
 
-> [!NOTE]
-> KV版本由于数据库配额较低, 可能不会添加MCP支持, 但如果MCP的代码能够优化到一定程度, 可能会有MCP支持.
+## 接口
 
-> [!NOTE]
-> 批量推送有最高优先级, 如果指定了`device_keys`且不为空, `device_key`将被忽略.
+- `GET /ping`：公开的存活检查。
+- `GET /healthz`：就绪检查，不泄露敏感配置细节。
+- `GET /info`：需认证的服务信息；仅当 `ALLOW_QUERY_NUMS="true"` 时才显示设备数量。
+- `POST /register`：主注册接口。支持 JSON 或表单字段 `device_key`、`device_token`，并兼容旧字段名 `key`、`devicetoken`。
+- `POST /push`：JSON 或表单推送接口，支持有硬上限的批量推送。
+- Bark 路径式推送：为兼容现有客户端，继续支持原有 GET 和 POST 路径。
+- `POST /mcp` 和 `DELETE /mcp`：仅 D1 版本支持的 MCP Streamable HTTP 生命周期，详见 [MCP](doc/mcp.zh.md)。
 
-<!-- > [!CAUTION]
-> 对于D1 Alpha用户： 在2024-08-01之后， D1 Alpha数据库将停止接受SQL查询，需要使用新的D1数据库，参考[迁移指南](https://developers.cloudflare.com/d1/platform/alpha-migration/) -->
+当提供非空 `device_keys` 时，批量模式优先。为保持 Bark 兼容，批量响应外层仍为 HTTP 200，并提供逐项结果以及 `success_count`、`failed_count`、`partial_failure`。
 
-Bark-Worker 是一个 [Bark-Server](https://github.com/Finb/bark-server) 在 Cloudflare Worker 上的实现. 为隐私敏感的用户提供一个低成本且保证隐私的服务端.
+## 安全默认值
 
-### 什么是 [Bark](https://github.com/Finb/Bark)?
-[Bark](https://github.com/Finb/Bark) 是一个允许向iPhone发送通知的iOS APP.
+仓库配置默认使用 `SECURITY_MODE="strict"`。在 strict 模式下，注册、推送、MCP 和 `/info` 都需要 HTTP Basic 认证，只有 `/ping` 保持公开。缺少 `BASIC_AUTH` 时会安全失败：受保护接口及就绪检查返回配置错误，不会退化为匿名放行。
 
-> [!NOTE]
-> 如果worker.dev域名在当前国家/地区不可用，则需要一个自己的域名
+运行时凭据必须使用 Cloudflare Secrets，不能放进 Wrangler `vars` 或源码常量：
 
-## 特性
-- 支持所有的Bark-Server API
-    - `register`
-    - `ping`
-    - `healthz`
-    - `info`
-    - `push`
-- 基于路径的参数解析
-- 便于部署, 低成本且方便管理
+- `BASIC_AUTH`
+- `APNS_PRIVATE_KEY`
+- `APNS_TEAM_ID`
+- `APNS_KEY_ID`
+- `APNS_TOPIC`
+
+布尔配置只接受小写字符串 `"true"` 和 `"false"`；例如 `"False"` 会被视为配置错误。`SECURITY_MODE="compat"` 是需要显式开启的临时迁移模式，不是推荐的生产默认值，也绝不会关闭 MCP 认证。
+
+注册主接口是 `POST /register`。只有设置 `ALLOW_LEGACY_GET_REGISTER="true"` 才会开放旧 GET 注册，同时还必须把 `LEGACY_GET_REGISTER_SUNSET` 设置为合法 HTTP-date；缺失或非法日期都是配置错误。开启后的响应带有 `Deprecation`、已配置的 `Sunset`、`Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。应以该 `Sunset` 值作为迁移截止时间。不要把真实 device token 或 key 放入 URL、终端历史、日志、支持工单或截图。
+
+已有 key 的处理规则刻意保持保守：
+
+- 相同 key 和 token 是幂等成功，不重复写入。
+- 更换为不同 token 必须通过 Basic Auth。
+- 未认证的重绑返回 HTTP 409。
+- `ALLOW_INSECURE_DEVICE_REBIND="true"` 仅是 `SECURITY_MODE="compat"` 下的迁移逃生开关；除非执行有边界且可监控的迁移，否则必须保持关闭。
+
+## 资源预算
+
+| 边界 | 默认值 |
+| --- | ---: |
+| 请求体 | 32 KiB（`MAX_REQUEST_BYTES="32768"`） |
+| 最终 APNs JSON payload | 4096 UTF-8 bytes |
+| 单批设备数 | 20（`MAX_BATCH_SIZE="20"`） |
+| APNs 并发数 | 5（`BATCH_CONCURRENCY="5"`） |
+| APNs 超时 | 10 秒（`APNS_TIMEOUT_MS="10000"`，合法范围 1–30 秒） |
+
+四个 Cloudflare Rate Limiting binding 分别是 `REGISTER_RATE_LIMITER`（5 次/60 秒）、`PUSH_RATE_LIMITER`（60 次/60 秒）、`BATCH_RATE_LIMITER`（10 次/60 秒）和 `MCP_RATE_LIMITER`（60 次/60 秒）。其计数按数据中心局部生效且最终一致，因此它们只是防滥用层，不是精确的全局配额，也不能替代同步执行的请求体、批量、并发和 APNs payload 硬上限。
+
+## 存储与生命周期
+
+`migrations/` 中的 D1 migration 是生产 schema 的权威历史；依赖新结构的代码部署前必须先应用 migration。可等待的 AutoMigrate 是首次运行或手工复制部署时的幂等兜底，不能替代 migration 记录。schema 就绪失败时，依赖 D1 的接口返回 HTTP 503。
+
+D1 入口通过 `0 * * * *` 的 scheduled handler 清理过期 MCP Session，即每个 UTC 整点执行一次。HTTP 请求不会执行 Session 清理。
+
+APNs 请求的 payload 上限为 4096 bytes，并有明确超时。超时映射为 HTTP 504，网络故障映射为 502，APNs 5xx 映射为 503；限流保留 429 和 `Retry-After`。响应会标记可重试错误，但 Worker 不会在同步请求内自动重试通知，因为这可能产生重复推送。任何曾经出现在源码或 Git 历史中的 APNs 签名 Key 都必须在 Apple Developer 后台撤销并轮换；仅从文件中删除不算完成处置。
 
 ## 部署
 
-> [!NOTE]
-> 从D1版本和KV版本中选择一个. 更推荐D1版本, D1版本的额度更高.
+请按[安全部署指南](doc/setup_guide.zh.md)在 CI 外创建 D1、配置 `database` binding、交互式写入 Cloudflare Secrets、应用 migration、本地验证并部署。生成 bundle、dry run 或单元测试通过，都不能证明生产环境已部署或 APNs Key 已完成轮换。
 
-<!-- > [!CAUTION]
-> 当Cloudfalre D1不再Beta后, KV版本的Database部分可能停止维护. -->
-
-### 直接部署D1版本
-
-> [!NOTE]
-> Cloudflare API Token必须有D1权限
-
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cwxiaos/bark-worker)
-
-### 或手动部署
-
-参考 [部署指南](doc/setup_guide.zh.md)
-
-#### Cloudflare D1 版本
-
-创建一个Worker和D1 数据库, 将D1 数据库绑定至Worker并命名为 `database`
-
-#### Cloudflare KV 版本
-
-创建一个Worker和KV 存储, 将KV 存储绑定至Worker并命名为 `database`
-
-## Tips
-
-- 一个设备使用多个Key
-- 设备Key别名
-- D1数据库Console管理
-- etc.
-
-参考 [Tips](doc/tips.zh.md)
+更多运维和迁移说明见 [Tips](doc/tips.zh.md)。MCP 客户端连接前应先阅读 [MCP 生命周期与安全合同](doc/mcp.zh.md)。
