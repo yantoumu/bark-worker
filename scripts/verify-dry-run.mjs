@@ -1,18 +1,30 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
-import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const outputDirectory = await mkdtemp(join(tmpdir(), 'bark-worker-wrangler-'))
-const require = createRequire(import.meta.url)
-const wrangler = require.resolve('wrangler/bin/wrangler.js')
+const wrangler = fileURLToPath(new URL(
+    process.platform === 'win32'
+        ? '../node_modules/.bin/wrangler.cmd'
+        : '../node_modules/.bin/wrangler',
+    import.meta.url,
+))
 
 try {
     const result = spawnSync(
-        process.execPath,
-        [wrangler, 'deploy', '--dry-run', '--outdir', outputDirectory],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+        wrangler,
+        ['deploy', '--dry-run', '--outdir', outputDirectory],
+        {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+                ...process.env,
+                CI: 'true',
+                WRANGLER_SEND_METRICS: 'false',
+            },
+        },
     )
 
     process.stdout.write(result.stdout)

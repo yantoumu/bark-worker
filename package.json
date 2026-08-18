@@ -15,7 +15,7 @@
         "dash": true
     },
     "devDependencies": {
-        "wrangler": "4.84.1"
+        "wrangler": "4.123.0"
     },
     "scripts": {
         "test": "node --test test/*.test.js",

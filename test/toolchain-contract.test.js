@@ -9,13 +9,13 @@ import test from 'node:test'
 
 const readJson = async (path) => JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), 'utf8'))
 
-test('Wrangler is reproducibly locked to exactly 4.84.1', async () => {
+test('Wrangler is reproducibly locked to exactly 4.123.0', async () => {
     const manifest = await readJson('package.json')
     const lock = await readJson('package-lock.json')
 
-    assert.equal(manifest.devDependencies.wrangler, '4.84.1')
-    assert.equal(lock.packages[''].devDependencies.wrangler, '4.84.1')
-    assert.equal(lock.packages['node_modules/wrangler'].version, '4.84.1')
+    assert.equal(manifest.devDependencies.wrangler, '4.123.0')
+    assert.equal(lock.packages[''].devDependencies.wrangler, '4.123.0')
+    assert.equal(lock.packages['node_modules/wrangler'].version, '4.123.0')
     assert.doesNotMatch(manifest.devDependencies.wrangler, /^[~^*><=]/)
 })
 
