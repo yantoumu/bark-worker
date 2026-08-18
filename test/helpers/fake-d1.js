@@ -19,6 +19,9 @@ export class FakeD1Database {
             ? { token: 'test-authorization-token', time: String(nowSeconds()) }
             : options.authorization
         this.sessions = new Map(options.sessions ?? [])
+        this.users = new Map(options.users ?? [])
+        this.authSessions = new Map(options.authSessions ?? [])
+        this.apnsCredentials = options.apnsCredentials ?? null
         this.failures = [...(options.failures ?? [])]
         this.queryHandlers = [...(options.queryHandlers ?? [])]
         this.now = options.now ?? nowSeconds
@@ -115,6 +118,94 @@ export class FakeD1Database {
 
         if (query.includes('select count(*)') && query.includes('from `devices`')) {
             return { results: [{ rowCount: this.devices.size }], success: true }
+        }
+
+        if (query.includes('select count(*)') && query.includes('from `users`')) {
+            return { results: [{ rowCount: this.users.size }], success: true }
+        }
+
+        if (query.includes('from `users`') && query.includes('where `username` = ?')) {
+            const user = this.users.get(bindings[0])
+            return { results: user ? [clone(user)] : [], success: true }
+        }
+
+        if (query.startsWith('insert or ignore into `users`')) {
+            const firstAdminInsert = query.includes('where not exists')
+            const [username, passwordHash, passwordSalt, passwordIterations, passwordAlgorithm] = bindings
+            const role = firstAdminInsert ? 'admin' : bindings[5]
+            const createdAt = bindings[firstAdminInsert ? 5 : 6]
+            const updatedAt = bindings[firstAdminInsert ? 6 : 7]
+            if ((firstAdminInsert && this.users.size > 0) || this.users.has(username)) {
+                return { results: [], success: true, meta: { changes: 0 } }
+            }
+            this.users.set(username, {
+                username,
+                password_hash: passwordHash,
+                password_salt: passwordSalt,
+                password_iterations: Number(passwordIterations),
+                password_algorithm: passwordAlgorithm,
+                role,
+                disabled: 0,
+                created_at: Number(createdAt),
+                updated_at: Number(updatedAt),
+            })
+            return { results: [], success: true, meta: { changes: 1 } }
+        }
+
+        if (query.includes('from `auth_sessions`') && query.includes('join `users`')) {
+            const session = this.authSessions.get(bindings[0])
+            if (!session || session.expires_at <= Number(bindings[1])) return { results: [], success: true }
+            const user = this.users.get(session.username)
+            if (!user || Number(user.disabled)) return { results: [], success: true }
+            return { results: [{
+                username: user.username,
+                role: user.role,
+                expires_at: session.expires_at,
+            }], success: true }
+        }
+
+        if (query.startsWith('insert into `auth_sessions`')) {
+            const [tokenHash, username, createdAt, expiresAt] = bindings
+            this.authSessions.set(tokenHash, {
+                token_hash: tokenHash,
+                username,
+                created_at: Number(createdAt),
+                expires_at: Number(expiresAt),
+            })
+            return { results: [], success: true, meta: { changes: 1 } }
+        }
+
+        if (query.startsWith('delete from `auth_sessions`') && query.includes('where `token_hash`')) {
+            const changed = this.authSessions.delete(bindings[0]) ? 1 : 0
+            return { results: [], success: true, meta: { changes: changed } }
+        }
+
+        if (query.startsWith('delete from `auth_sessions`')) {
+            let changes = 0
+            for (const [tokenHash, session] of this.authSessions) {
+                if (session.expires_at < Number(bindings[0])) {
+                    this.authSessions.delete(tokenHash)
+                    changes += 1
+                }
+            }
+            return { results: [], success: true, meta: { changes } }
+        }
+
+        if (query.includes('from `apns_credentials`') && query.includes('where `id` = 1')) {
+            return { results: this.apnsCredentials ? [clone(this.apnsCredentials)] : [], success: true }
+        }
+
+        if (query.startsWith('insert into `apns_credentials`')) {
+            const [ciphertext, iv, keyVersion, updatedBy, updatedAt] = bindings
+            this.apnsCredentials = {
+                id: 1,
+                ciphertext,
+                iv,
+                key_version: Number(keyVersion),
+                updated_by: updatedBy,
+                updated_at: Number(updatedAt),
+            }
+            return { results: [], success: true, meta: { changes: 1 } }
         }
 
         if (query.includes('select `token`') && query.includes('from `devices`')) {

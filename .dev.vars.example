@@ -1,10 +1,12 @@
 # Copy this file to .dev.vars and replace every placeholder locally.
 # Never commit .dev.vars or real credentials.
-BASIC_AUTH="replace-with-local-user:replace-with-local-password"
-APNS_PRIVATE_KEY="replace-with-local-pkcs8-private-key"
-APNS_TEAM_ID="replace-with-local-team-id"
-APNS_KEY_ID="replace-with-local-key-id"
-APNS_TOPIC="replace-with-local-app-topic"
+# Random 32-byte key encoded as canonical Base64. Back it up securely: losing it
+# makes D1 password hashes and encrypted APNs credentials unusable.
+APP_MASTER_KEY="replace-with-base64-encoded-32-byte-key"
+
+# One-time setup authorization. The setup endpoint is permanently disabled once
+# the first D1 user exists, but this value must still be kept secret.
+ADMIN_BOOTSTRAP_TOKEN="replace-with-at-least-32-random-bytes"
 
 # Non-browser MCP clients may omit Origin. If Origin is sent, configure a
 # comma-separated list of exact scheme://host[:port] values; wildcards are rejected.

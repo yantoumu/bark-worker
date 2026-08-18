@@ -2,11 +2,11 @@
 
 除非小节明确提到 KV，本文默认针对 D1 入口。所有行为都通过 Cloudflare Secrets 和 Wrangler 变量配置；不要修改 `main.js` 或 `main_kv.js` 中的常量。
 
-## 安全模式与 Basic Auth
+## D1 用户认证与安全模式
 
-`SECURITY_MODE="strict"` 是生产默认值。注册、推送、MCP 和 `/info` 都需要 HTTP Basic 认证；`/ping` 保持公开，`/healthz` 只说明就绪状态而不返回秘密细节。无效凭据返回 HTTP 401，并带 `WWW-Authenticate` 和 `Cache-Control: no-store`；缺少 required `BASIC_AUTH` 是配置故障，返回 HTTP 503，不会开放访问。
+`SECURITY_MODE="strict"` 是生产默认值。注册、推送、MCP 和 `/info` 都需要 D1 用户认证；`/ping` 保持公开，`/healthz` 只说明就绪状态而不返回秘密细节。现有客户端可以继续发送 Basic `username:password`，也可以先调用 `/auth/login` 再使用 Bearer 会话。无效凭据返回 HTTP 401，并带 `WWW-Authenticate` 和 `Cache-Control: no-store`。
 
-通过交互式 secret 提示，把准确的 `username:password` 值保存到 Cloudflare Secret `BASIC_AUTH`。不要把它的 Base64 表示放入源码或 `vars`，也不要把凭据或完整 `Authorization` Header 粘贴进命令、日志、截图、Issue 或聊天。
+密码在 D1 中保存为独立盐、100000 次 PBKDF2-SHA256 和 Secret 派生 pepper 的不可逆哈希；登录令牌只保存 SHA-256 哈希。管理员通过 `/admin/users` 添加账号。不要把凭据或完整 `Authorization` Header 粘贴进命令、日志、截图、Issue 或聊天。
 
 `SECURITY_MODE="compat"` 只用于迁移尚不能发送认证信息的客户端。每个 compat 部署都必须有责任人、监控和退出日期。Compat 绝不会关闭 MCP 认证。
 
@@ -95,11 +95,11 @@ Worker 在联系 Apple 前校验最终编码后的 APNs payload。配置超时�
 
 同步请求内不会自动重试。立即重试可能产生重复通知；调用方根据 `retryable` 和 `Retry-After` 决定是否及何时重试。Worker 的响应或日志不得泄露原始 device key、token、APNs JWT、SQL 或上游异常文本。
 
-APNs provider JWT 只缓存在 isolate 内存，新 token 不写入 D1 或 KV 的 authorization 记录。暴露过的签名 Key 必须在 Apple Developer 后台撤销并轮换；只从源码删除或替换 Cloudflare Secret、却不撤销旧 Key，事故处置仍未完成。
+APNs 完整凭据使用 AES-256-GCM 加密后保存在 D1；解密根密钥只存在 Cloudflare Secret。provider JWT 只缓存在 isolate 内存，新 token 不写入 D1 的 authorization 记录。暴露过的签名 Key 必须在 Apple Developer 后台撤销并轮换；只从源码删除或更新 D1、却不撤销旧 Key，事故处置仍未完成。
 
 ## Rate Limiting 不是硬配额
 
-配置预算是注册 5 次/60 秒、单推送 60 次/60 秒、批量 10 次/60 秒、MCP 60 次/60 秒。Cloudflare Rate Limiting binding 按数据中心局部计数并最终一致，可能允许短时跨地域突发，不能用于计费或精确全局限额。
+配置预算是注册 5 次/60 秒、单推送 60 次/60 秒、批量 10 次/60 秒、MCP 60 次/60 秒，以及每个 IP/用户名的 D1 Basic 校验 60 次/60 秒。Cloudflare Rate Limiting binding 按数据中心局部计数并最终一致，可能允许短时跨地域突发，不能用于计费或精确全局限额。
 
 即使 binding 存在，也必须保留应用硬上限。Rate limiter 不能替代请求体流式检查、20 设备批量上限、并发控制、schema 校验或 APNs 4096-byte 限制。
 
@@ -114,7 +114,7 @@ APNs provider JWT 只缓存在 isolate 内存，新 token 不写入 D1 或 KV �
 
 可等待的 AutoMigrate 是首次运行或手工复制部署的幂等兜底。依赖 D1 的接口会等待它，schema 失败返回 HTTP 503；它不能替代 Wrangler migration ledger。
 
-D1 入口通过 `scheduled()` 在 `0 * * * *` 清理 Session，即每个 UTC 整点一次。清理使用分别带索引的 `last_seen` 和 `created_at` DELETE。HTTP 流量不会触发清理，因此正确配置 Cron 后，即使服务空闲也能执行。
+D1 入口通过 `scheduled()` 在 `0 * * * *` 清理 MCP 与登录 Session，即每个 UTC 整点一次。清理使用带索引的 `last_seen`、`created_at` 和 `expires_at` DELETE。HTTP 流量不会触发清理，因此正确配置 Cron 后，即使服务空闲也能执行。
 
 ## MCP Origin 与 Session 提示
 
@@ -125,7 +125,7 @@ D1 入口通过 `scheduled()` 在 `0 * * * *` 清理 Session，即每个 UTC 整
 ## 运维检查清单
 
 - staging 与 production 的 Worker、D1 和 Secrets 分离。
-- 使用交互式 `wrangler secret put`；绝不把凭据作为 shell 参数传入。
+- 使用交互式 `wrangler secret put` 配置根密钥与引导令牌；绝不把秘密作为 shell 参数传入。
 - 依次执行 `npm run verify`、备份 D1、应用 migration、部署、受控 smoke 检查。
 - HTTP 401 表示认证失败，409 表示受保护的重绑冲突，413 表示大小越界，429 表示限流，502/503/504 表示已分类的基础设施/上游故障。
 - 调查时保留 request ID，但必须脱敏 Authorization、设备数据、APNs JWT、Session ID、SQL 和私钥。
@@ -133,4 +133,4 @@ D1 入口通过 `scheduled()` 在 `0 * * * *` 清理 Session，即每个 UTC 整
 
 ## KV 兼容范围
 
-`main_kv.js` 仍是手工配置的兼容入口，并继续维护注册、认证、校验、APNs 和错误处理等通用安全行为。已提交的 Wrangler 配置和部署工作流不会选择它。它没有 MCP、D1 migration、AutoMigrate 或 D1 Cron Session 清理，不能宣称与默认 D1 生产入口完全等价。
+`main_kv.js` 仍是手工配置的旧兼容入口，继续使用 `BASIC_AUTH` 与 APNs Cloudflare Secrets。已提交的 Wrangler 配置和部署工作流不会选择它。它没有 D1 用户登录、APNs 保险库、MCP、D1 migration、AutoMigrate 或 D1 Cron Session 清理，不能宣称与默认 D1 生产入口完全等价。

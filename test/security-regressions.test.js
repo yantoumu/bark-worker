@@ -43,7 +43,7 @@ async function request(worker, path, { env, method = 'GET', headers, body, settl
 }
 
 for (const implementation of workers) {
-    test(`${implementation.name}: strict mode fails closed when BASIC_AUTH is missing`, async (t) => {
+    test(`${implementation.name}: strict mode fails closed when legacy BASIC_AUTH is missing`, async (t) => {
         const apns = createAPNsStub()
         installFetchStub(t, apns.fetch)
         const binding = implementation.binding()
@@ -56,7 +56,7 @@ for (const implementation of workers) {
             body: JSON.stringify({ device_key: TEST_DEVICE_KEY, body: 'must not send' }),
         })
 
-        assert.equal(response.status, 503)
+        assert.equal(response.status, implementation.name === 'D1' ? 401 : 503)
         assert.equal(apns.requests.length, 0)
         assert.match(response.headers.get('cache-control') ?? '', /no-store/i)
     })

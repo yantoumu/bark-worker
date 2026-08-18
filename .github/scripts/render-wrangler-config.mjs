@@ -9,11 +9,8 @@ const outputPath = path.resolve(
 )
 const placeholderDatabaseId = '00000000-0000-0000-0000-000000000000'
 const requiredSecrets = [
-    'BASIC_AUTH',
-    'APNS_PRIVATE_KEY',
-    'APNS_TEAM_ID',
-    'APNS_KEY_ID',
-    'APNS_TOPIC',
+    'APP_MASTER_KEY',
+    'ADMIN_BOOTSTRAP_TOKEN',
 ]
 const strictVars = {
     SECURITY_MODE: 'strict',
@@ -33,6 +30,7 @@ const rateLimitBudgets = {
     PUSH_RATE_LIMITER: 60,
     BATCH_RATE_LIMITER: 10,
     MCP_RATE_LIMITER: 60,
+    AUTH_RATE_LIMITER: 60,
 }
 const localRateLimitNamespaceBase = 1000
 
@@ -56,9 +54,21 @@ function parseRepositoryJsonc(text) {
     return JSON.parse(text.replace(/^\s*\/\/.*(?:\r?\n|$)/gm, ''))
 }
 
-function validateConfig(config, expectedDatabaseId, expectedRateLimitNamespaceIds) {
+function validateConfig(config, expectedDatabaseId, expectedRateLimitNamespaceIds, production) {
     assert(config && typeof config === 'object', 'Wrangler config must be an object')
     assert(config.keep_vars === false, 'keep_vars must remain false')
+
+    if (production) {
+        assert(
+            Array.isArray(config.routes)
+                && config.routes.length === 1
+                && config.routes[0]?.pattern === 'bark.seo9.org'
+                && config.routes[0]?.custom_domain === true,
+            'Production must publish exactly the bark.seo9.org custom domain',
+        )
+    } else {
+        assert(!('routes' in config), 'Non-production configs must not claim the production custom domain')
+    }
 
     const databaseBindings = (config.d1_databases || []).filter(
         (binding) => binding.binding === 'database',
@@ -86,13 +96,13 @@ function validateConfig(config, expectedDatabaseId, expectedRateLimitNamespaceId
     assert(
         configuredSecrets.length === requiredSecrets.length
             && requiredSecrets.every((name) => configuredSecrets.includes(name)),
-        'secrets.required must contain the complete APNs and Basic Auth secret set',
+        'secrets.required must contain the D1 vault root and bootstrap secret set',
     )
 
     const rateLimits = config.ratelimits || []
     assert(
         rateLimits.length === Object.keys(rateLimitBudgets).length,
-        'Expected exactly four rate limit bindings',
+        'Expected exactly five rate limit bindings',
     )
     const namespaceIds = new Set()
     for (const [name, limit] of Object.entries(rateLimitBudgets)) {
@@ -184,6 +194,7 @@ let expectedRateLimitNamespaceIds = localRateLimitNamespaceIds
 if (workerNameOverride) {
     assert(workerNameOverride !== config.name, 'Environment Worker name must differ from the default production name')
     config.name = workerNameOverride
+    delete config.routes
 }
 if (rateLimitNamespaceBaseValue) {
     const namespaceBase = Number(rateLimitNamespaceBaseValue)
@@ -191,7 +202,7 @@ if (rateLimitNamespaceBaseValue) {
         Number.isSafeInteger(namespaceBase)
             && namespaceBase > 0
             && namespaceBase <= Number.MAX_SAFE_INTEGER - Object.keys(rateLimitBudgets).length,
-        'RATE_LIMIT_NAMESPACE_BASE must safely allocate four consecutive namespace IDs',
+        'RATE_LIMIT_NAMESPACE_BASE must safely allocate five consecutive namespace IDs',
     )
     expectedRateLimitNamespaceIds = rateLimitNamespaceIds(namespaceBase)
     for (const binding of config.ratelimits || []) {
@@ -205,7 +216,7 @@ if (workerNameOverride) {
         Number.isSafeInteger(productionNamespaceBase)
             && productionNamespaceBase > 0
             && productionNamespaceBase <= Number.MAX_SAFE_INTEGER - Object.keys(rateLimitBudgets).length,
-        'PRODUCTION_RATE_LIMIT_NAMESPACE_BASE must safely allocate four consecutive namespace IDs',
+        'PRODUCTION_RATE_LIMIT_NAMESPACE_BASE must safely allocate five consecutive namespace IDs',
     )
     const productionIds = new Set(Object.values(rateLimitNamespaceIds(productionNamespaceBase)))
     assert(
@@ -213,7 +224,7 @@ if (workerNameOverride) {
         'Staging and production rate limit namespace ranges must not overlap',
     )
 }
-validateConfig(config, databaseId, expectedRateLimitNamespaceIds)
+validateConfig(config, databaseId, expectedRateLimitNamespaceIds, !workerNameOverride)
 
 const sourceDirectory = path.dirname(sourcePath)
 const outputDirectory = path.dirname(outputPath)
@@ -243,6 +254,6 @@ await rename(temporaryPath, outputPath)
 
 const writtenText = await readFile(outputPath, 'utf8')
 assert(!writtenText.includes(placeholderDatabaseId), 'Generated config contains the placeholder')
-validateConfig(JSON.parse(writtenText), databaseId, expectedRateLimitNamespaceIds)
+validateConfig(JSON.parse(writtenText), databaseId, expectedRateLimitNamespaceIds, !workerNameOverride)
 
 console.log('Rendered and validated Wrangler config at ' + outputRelativePath)

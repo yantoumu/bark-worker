@@ -1,11 +1,8 @@
 import { readFile } from 'node:fs/promises'
 
 const requiredNames = new Set([
-    'BASIC_AUTH',
-    'APNS_PRIVATE_KEY',
-    'APNS_TEAM_ID',
-    'APNS_KEY_ID',
-    'APNS_TOPIC',
+    'APP_MASTER_KEY',
+    'ADMIN_BOOTSTRAP_TOKEN',
 ])
 
 const payload = JSON.parse(await readFile(process.argv[2], 'utf8'))
