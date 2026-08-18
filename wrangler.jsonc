@@ -1,4 +1,5 @@
 {
+    "$schema": "./node_modules/wrangler/config-schema.json",
     "name": "bark-worker",
     "main": "main.js",
     "compatibility_date": "2026-03-01",
@@ -8,18 +9,77 @@
     "observability": {
         "enabled": true
     },
+    "keep_vars": false,
     "d1_databases": [
         {
             "binding": "database",
             "database_name": "database-bark",
-            "database_id": "<unique-ID-for-your-database>"
+            "database_id": "00000000-0000-0000-0000-000000000000",
+            "migrations_dir": "migrations"
         }
     ],
-    "keep_vars": true,
+    "ratelimits": [
+        {
+            "name": "REGISTER_RATE_LIMITER",
+            "namespace_id": "1001",
+            "simple": {
+                "limit": 5,
+                "period": 60
+            }
+        },
+        {
+            "name": "PUSH_RATE_LIMITER",
+            "namespace_id": "1002",
+            "simple": {
+                "limit": 60,
+                "period": 60
+            }
+        },
+        {
+            "name": "BATCH_RATE_LIMITER",
+            "namespace_id": "1003",
+            "simple": {
+                "limit": 10,
+                "period": 60
+            }
+        },
+        {
+            "name": "MCP_RATE_LIMITER",
+            "namespace_id": "1004",
+            "simple": {
+                "limit": 60,
+                "period": 60
+            }
+        }
+    ],
+    "triggers": {
+        "crons": [
+            "0 * * * *"
+        ]
+    },
+    "secrets": {
+        "required": [
+            "BASIC_AUTH",
+            "APNS_PRIVATE_KEY",
+            "APNS_TEAM_ID",
+            "APNS_KEY_ID",
+            "APNS_TOPIC"
+        ]
+    },
     "vars": {
+        "SECURITY_MODE": "strict",
         "ALLOW_NEW_DEVICE": "true",
-        "ALLOW_QUERY_NUMS": "true",
+        "ALLOW_QUERY_NUMS": "false",
+        "ALLOW_LEGACY_GET_REGISTER": "false",
+        "ALLOW_INSECURE_DEVICE_REBIND": "false",
+        "MCP_ALLOWED_ORIGINS": "",
+        // Required only when ALLOW_LEGACY_GET_REGISTER is "true". Uncomment and
+        // replace the placeholder with the real migration deadline as a valid HTTP-date.
+        // "LEGACY_GET_REGISTER_SUNSET": "<valid HTTP-date selected for this migration>",
         "ROOT_PATH": "/",
-        // "BASIC_AUTH": ""
+        "MAX_REQUEST_BYTES": "32768",
+        "MAX_BATCH_SIZE": "20",
+        "BATCH_CONCURRENCY": "5",
+        "APNS_TIMEOUT_MS": "10000"
     }
 }

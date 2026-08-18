@@ -6,71 +6,68 @@
 
 English | **[中文文档](README.zh.md)**
 
-<!-- > [!CAUTION]
-> There are bugs in Cloudflare Dashboard for now(2024-07-27), deploy and variables edit are not available, DONOT change anything before Cloudflare fix that. If you want to deploy, use wrangler. -->
+Bark-Worker is a [Bark server](https://github.com/Finb/bark-server) implementation for Cloudflare Workers. It provides a small, self-hosted backend for sending notifications to the [Bark iOS app](https://github.com/Finb/Bark).
 
-<!-- > [!NOTE]
-> Device token may change, the previous way to use multi-key or key alias may be unavailable, refer to [Tips](doc/tips.md) for more details. -->
+> [!IMPORTANT]
+> `main.js` is the default production entrypoint. The checked-in Wrangler configuration and deployment workflow target this D1 version. `main_kv.js` remains a manually deployed KV compatibility entrypoint: it has no MCP support and is not selected by the default deployment path. Common authentication, registration, validation, APNs, and error-handling security behavior is still maintained in both entrypoints.
 
-> [!NOTE]
-> KV Version will probably not support MCP due to limited quota, but if the MCP route can be optimized to some extent, there may have MCP support in KV version.
+## Interfaces
 
-> [!NOTE]
-> Batch Push has the highest priority, if `device_keys` is specified and not empty, `device_key` will be ignored, in both V1 and V2 APIs.
+- `GET /ping`: public liveness check.
+- `GET /healthz`: readiness check with no sensitive configuration details.
+- `GET /info`: authenticated service information; device counts are hidden unless `ALLOW_QUERY_NUMS="true"`.
+- `POST /register`: primary registration interface. It accepts JSON or form fields `device_key` and `device_token`, plus the legacy aliases `key` and `devicetoken`.
+- `POST /push`: JSON or form push interface, including bounded batch pushes.
+- Path-style Bark push: existing GET and POST paths remain supported for client compatibility.
+- `POST /mcp` and `DELETE /mcp`: D1-only MCP Streamable HTTP lifecycle; see [MCP](doc/mcp.md).
 
-<!-- > [!CAUTION]
-> For D1 Alpha Users: On August 1, 2024, D1 alpha databases will stop accepting live SQL queries. See [Migration Guide](https://developers.cloudflare.com/d1/platform/alpha-migration/) -->
+Batch mode takes precedence when a non-empty `device_keys` value is supplied. The outer batch response remains HTTP 200 for Bark compatibility and includes per-item results plus `success_count`, `failed_count`, and `partial_failure`.
 
-Bark-Worker is a [Bark-Server](https://github.com/Finb/bark-server) implenmention on Cloudflare Worker. It provides privacy-aware users with a cheap and private bark backend. 
+## Secure defaults
 
-### What is [Bark](https://github.com/Finb/Bark)?
-[Bark](https://github.com/Finb/Bark) is an iOS App which allows you to push customed notifications to your iPhone.
+The repository configuration defaults to `SECURITY_MODE="strict"`. In strict mode, registration, push, MCP, and `/info` require HTTP Basic authentication. `/ping` remains public. A missing `BASIC_AUTH` fails closed: protected routes and readiness return a configuration error instead of allowing anonymous access.
 
-> [!NOTE]
-> A domain is required if worker.dev is unavailable in your country/region
+Runtime credentials are Cloudflare Secrets, never Wrangler `vars` or source constants:
 
-## Features
-- Full Bark-Server APIs support
-    - `register`
-    - `ping`
-    - `healthz`
-    - `info`
-    - `push`
-- Path based parameters resolve
-- Easy to deploy, Cheap to use and Convenient to manage
+- `BASIC_AUTH`
+- `APNS_PRIVATE_KEY`
+- `APNS_TEAM_ID`
+- `APNS_KEY_ID`
+- `APNS_TOPIC`
 
-## Setup
+Only the lowercase strings `"true"` and `"false"` are accepted for boolean configuration. A misspelling such as `"False"` is a configuration error. `SECURITY_MODE="compat"` is an explicit, temporary migration mode; it is not the recommended production default and never disables MCP authentication.
 
-> [!NOTE]
-> Select one, D1 or KV Version are both available. D1 Version is recommended for its higher usage than KV Version
+The primary registration method is `POST /register`. Legacy GET registration is disabled unless `ALLOW_LEGACY_GET_REGISTER="true"`; enabling it also requires `LEGACY_GET_REGISTER_SUNSET` to be a valid HTTP-date. Missing or invalid dates are configuration errors. Enabled responses carry `Deprecation`, the configured `Sunset`, `Cache-Control: no-store`, and `Referrer-Policy: no-referrer`. Treat that `Sunset` value as the migration deadline. Do not put a real device token or key in a URL, terminal history, log, support ticket, or screenshot.
 
-<!-- > [!CAUTION]
-> After Cloudflare D1 is not in Beta, KV Version maybe deprecated. -->
+Existing-key behavior is deliberately conservative:
 
-### Follow the instructions for D1 Version
+- The same key and token is an idempotent success.
+- A different token requires valid Basic Auth.
+- An unauthenticated rebind is rejected with HTTP 409.
+- `ALLOW_INSECURE_DEVICE_REBIND="true"` is a migration-only escape hatch valid only with `SECURITY_MODE="compat"`; keep it off unless a bounded, monitored migration requires it.
 
-> [!NOTE]
-> The Cloudflare API Token must have D1 permission.
+## Resource budgets
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cwxiaos/bark-worker)
+| Boundary | Default |
+| --- | ---: |
+| Request body | 32 KiB (`MAX_REQUEST_BYTES="32768"`) |
+| Final APNs JSON payload | 4096 UTF-8 bytes |
+| Devices per batch | 20 (`MAX_BATCH_SIZE="20"`) |
+| Concurrent APNs calls | 5 (`BATCH_CONCURRENCY="5"`) |
+| APNs timeout | 10 seconds (`APNS_TIMEOUT_MS="10000"`, valid range 1–30 seconds) |
 
-### Or manually deploy
+The four Cloudflare Rate Limiting bindings are `REGISTER_RATE_LIMITER` (5/60 seconds), `PUSH_RATE_LIMITER` (60/60 seconds), `BATCH_RATE_LIMITER` (10/60 seconds), and `MCP_RATE_LIMITER` (60/60 seconds). Their counters are data-center-local and eventually consistent, so they are an abuse-control layer—not an exact global quota or a replacement for the synchronous body, batch, concurrency, and APNs payload limits.
 
-Refer to [Setup Guide](doc/setup_guide.md)
+## Storage and lifecycle
 
-#### Cloudflare D1 Version
+D1 migrations in `migrations/` are the authoritative production schema history and must be applied before deploying code that depends on them. Awaited AutoMigrate is an idempotent fallback for first-run or manually copied deployments; it does not replace migration records. D1-backed routes return HTTP 503 when schema readiness fails.
 
-Create a Worker and a D1 Database, bind D1 database to Worker with name `database`
+Expired MCP sessions are cleaned by the D1 entrypoint's scheduled handler at `0 * * * *`—once per hour in UTC. HTTP requests do not run session cleanup.
 
-#### Cloudflare KV Version
+APNs requests are limited to 4096 payload bytes and have an explicit timeout. Timeouts map to HTTP 504, network failures to 502, and APNs 5xx responses to 503; throttling preserves 429 and `Retry-After`. Retryable failures are marked, but the Worker does not synchronously retry a notification because that can create duplicates. Any APNs signing key previously exposed in source or history must be revoked and rotated in Apple Developer; deleting it from a file is not remediation.
 
-Create a Worker and a KV Storage, bind KV Storage to Worker with name `database`
+## Deployment
 
-## Tips
+Use the [secure setup guide](doc/setup_guide.md) to create D1 outside CI, configure the `database` binding, install Cloudflare Secrets interactively, apply migrations, verify locally, and deploy. Do not treat a generated bundle, dry run, or successful unit test as evidence that production was deployed or that an APNs key was rotated.
 
-- Multi Device Key to one Device
-- Device Key Alias
-- D1 Database Manage in Console
-- etc.
-
-Refer to [Tips](doc/tips.md)
+Additional operating and migration guidance is in [Tips](doc/tips.md). MCP clients should read the [MCP lifecycle and security contract](doc/mcp.md) before connecting.

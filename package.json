@@ -15,16 +15,22 @@
         "dash": true
     },
     "devDependencies": {
-        "wrangler": "^4.84.1"
+        "wrangler": "4.84.1"
     },
     "scripts": {
-        "test": "node --test",
+        "test": "node --test test/*.test.js",
+        "test:compat": "node --test test/push-compatibility.test.js",
+        "test:coverage": "npm run test:coverage:d1 && npm run test:coverage:kv",
+        "test:coverage:d1": "node --test --experimental-test-coverage --test-coverage-include=main.js --test-coverage-lines=80 --test-coverage-branches=75 --test-coverage-functions=85 test/*.test.js",
+        "test:coverage:kv": "node --test --experimental-test-coverage --test-coverage-include=main_kv.js --test-coverage-lines=80 --test-coverage-branches=75 --test-coverage-functions=85 test/*.test.js",
+        "check:syntax": "node scripts/verify-syntax.mjs",
         "cf-typegen": "wrangler types",
         "db:migrate": "wrangler d1 migrations apply database --local",
         "db:migrate:remote": "wrangler d1 migrations apply database --remote",
         "deploy": "wrangler deploy",
+        "deploy:dry-run": "node scripts/verify-dry-run.mjs",
         "dev": "wrangler dev",
-        "predeploy": "npm run db:migrate:remote",
-        "preview": "wrangler dev"
+        "preview": "wrangler dev",
+        "verify": "npm run check:syntax && npm run test:coverage && npm run deploy:dry-run"
     }
 }

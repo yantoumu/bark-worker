@@ -1,75 +1,404 @@
-name: Deploy
+name: Deploy production
 
 on:
   push:
     branches:
-      - main
+      - master
   workflow_dispatch:
-    inputs:
-      CLOUDFLARE_ACCOUNT_ID:
-        description: "Cloudflare Account ID"
-        default: ""
-        required: true
-        type: string
-      CLOUDFLARE_API_TOKEN:
-        description: "Cloudflare API Token"
-        default: ""
-        required: true
-        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bark-worker-production
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "24.18.0"
+  WRANGLER_CONFIG: ".wrangler/wrangler.production.jsonc"
+  STAGING_WRANGLER_CONFIG: ".wrangler/wrangler.staging.jsonc"
+  D1_BACKUP_PATH: ".backups/bark-production-${{ github.run_id }}-${{ github.run_attempt }}.sql"
+  D1_BACKUP_CIPHERTEXT_PATH: ".backups/bark-production-${{ github.run_id }}-${{ github.run_attempt }}.sql.enc"
 
 jobs:
-  deploy:
-    name: Deploy
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          node-version: 20
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Install wrangler
-        run: npm install -g wrangler
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Verify Cloudflare API Token
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Scan for embedded secrets
+        run: node .github/scripts/check-no-secrets.mjs
+
+      - name: Verify deployment helper contracts
         run: |
-          echo "Verifying Cloudflare API Token..."
-          wrangler whoami
+          node .github/scripts/test-backup-encryption.mjs
+          node .github/scripts/test-extract-active-version.mjs
+
+      - name: Run project verification
+        run: npm run verify
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ inputs.CLOUDFLARE_API_TOKEN }}
-          
-      - name: Check and Create D1 Database
+          BASIC_AUTH: "ci-user:ci-password"
+          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
+          APNS_TEAM_ID: "ci-placeholder-team"
+          APNS_KEY_ID: "ci-placeholder-key"
+          APNS_TOPIC: "ci.example.bark"
+
+      - name: Validate production config rendering
+        run: node .github/scripts/render-wrangler-config.mjs
+        env:
+          D1_DATABASE_ID: "11111111-1111-4111-8111-111111111111"
+
+      - name: Dry-run rendered production config
+        run: >-
+          ./node_modules/.bin/wrangler deploy
+          --dry-run
+          --strict
+          --config "$WRANGLER_CONFIG"
+          --outdir .wrangler/dry-run-production-config
+        env:
+          BASIC_AUTH: "ci-user:ci-password"
+          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
+          APNS_TEAM_ID: "ci-placeholder-team"
+          APNS_KEY_ID: "ci-placeholder-key"
+          APNS_TOPIC: "ci.example.bark"
+
+  deploy-staging:
+    name: Migrate, deploy, and smoke staging
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_SMOKE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate staging settings
+        shell: bash
         run: |
-          set -x
-          DB_LIST=$(wrangler d1 list --json)
-          DB_ID=$(echo $DB_LIST | jq -r '.[] | select(.name == "database-bark") | .uuid')
-      
-          if [ -z "$DB_ID" ]; then
-            CREATE_OUTPUT=$(wrangler d1 create database-bark)
-            DB_ID=$(echo "$CREATE_OUTPUT" | sed -n 's/.*"database_id": "\([a-f0-9-]*\)".*/\1/p')
-          else
-            echo "Found existing database-bark database"
+          set -euo pipefail
+          missing=0
+          require_value() {
+            if [[ -z "$2" ]]; then
+              echo "::error::Missing required staging setting: $1"
+              missing=1
+            fi
+          }
+          require_value "CLOUDFLARE_ACCOUNT_ID secret" "$CLOUDFLARE_ACCOUNT_ID"
+          require_value "CLOUDFLARE_API_TOKEN secret" "$CLOUDFLARE_API_TOKEN"
+          require_value "STAGING_WORKER_NAME variable" "$WORKER_NAME"
+          require_value "STAGING_D1_DATABASE_ID variable" "$D1_DATABASE_ID"
+          require_value "STAGING_RATE_LIMIT_NAMESPACE_BASE variable" "$RATE_LIMIT_NAMESPACE_BASE"
+          require_value "PRODUCTION_RATE_LIMIT_NAMESPACE_BASE variable" "$PRODUCTION_RATE_LIMIT_NAMESPACE_BASE"
+          require_value "STAGING_SMOKE_URL variable" "$SMOKE_BASE_URL"
+          require_value "BARK_SMOKE_BASIC_AUTH secret" "$SMOKE_BASIC_AUTH"
+          require_value "BARK_SMOKE_DEVICE_KEY secret" "$SMOKE_DEVICE_KEY"
+          require_value "BARK_SMOKE_DEVICE_TOKEN secret" "$SMOKE_DEVICE_TOKEN"
+          exit "$missing"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WORKER_NAME: ${{ vars.STAGING_WORKER_NAME }}
+          D1_DATABASE_ID: ${{ vars.STAGING_D1_DATABASE_ID }}
+          RATE_LIMIT_NAMESPACE_BASE: ${{ vars.STAGING_RATE_LIMIT_NAMESPACE_BASE }}
+          PRODUCTION_RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
+          SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_URL }}
+          SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
+          SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+
+      - name: Render staging Wrangler config
+        run: node .github/scripts/render-wrangler-config.mjs
+        env:
+          WRANGLER_OUTPUT_CONFIG: ${{ env.STAGING_WRANGLER_CONFIG }}
+          D1_DATABASE_ID: ${{ vars.STAGING_D1_DATABASE_ID }}
+          WORKER_NAME: ${{ vars.STAGING_WORKER_NAME }}
+          RATE_LIMIT_NAMESPACE_BASE: ${{ vars.STAGING_RATE_LIMIT_NAMESPACE_BASE }}
+          PRODUCTION_RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
+
+      - name: Dry-run staging bundle
+        run: >-
+          ./node_modules/.bin/wrangler deploy
+          --dry-run
+          --strict
+          --config "$STAGING_WRANGLER_CONFIG"
+          --outdir .wrangler/dry-run-staging-bundle
+        env:
+          BASIC_AUTH: "ci-user:ci-password"
+          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
+          APNS_TEAM_ID: "ci-placeholder-team"
+          APNS_KEY_ID: "ci-placeholder-key"
+          APNS_TOPIC: "ci.example.bark"
+
+      - name: Verify staging Worker secret names
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_list_path=".wrangler/staging-secret-names.json"
+          trap 'rm -f -- "$secret_list_path"' EXIT
+          umask 077
+          ./node_modules/.bin/wrangler secret list \
+            --format json \
+            --config "$STAGING_WRANGLER_CONFIG" >"$secret_list_path"
+          node .github/scripts/verify-worker-secrets.mjs "$secret_list_path"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Apply staging D1 migrations
+        run: >-
+          ./node_modules/.bin/wrangler d1 migrations apply database
+          --remote
+          --config "$STAGING_WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy staging Worker
+        run: >-
+          ./node_modules/.bin/wrangler deploy
+          --strict
+          --config "$STAGING_WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Run staging smoke
+        run: node .github/scripts/smoke.mjs
+        env:
+          SMOKE_BASE_URL: ${{ vars.STAGING_SMOKE_URL }}
+          SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
+          SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+
+  deploy-production:
+    name: Migrate, deploy, and smoke production
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_SMOKE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate deployment settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          require_value() {
+            local name="$1"
+            local value="$2"
+            if [[ -z "$value" ]]; then
+              echo "::error::Missing required production setting: $name"
+              missing=1
+            fi
+          }
+
+          require_value "CLOUDFLARE_ACCOUNT_ID secret" "$CLOUDFLARE_ACCOUNT_ID"
+          require_value "CLOUDFLARE_API_TOKEN secret" "$CLOUDFLARE_API_TOKEN"
+          require_value "CLOUDFLARE_D1_DATABASE_ID variable" "$D1_DATABASE_ID"
+          require_value "PRODUCTION_RATE_LIMIT_NAMESPACE_BASE variable" "$RATE_LIMIT_NAMESPACE_BASE"
+          require_value "PRODUCTION_SMOKE_URL variable" "$SMOKE_BASE_URL"
+          require_value "BARK_SMOKE_BASIC_AUTH secret" "$SMOKE_BASIC_AUTH"
+          require_value "BARK_SMOKE_DEVICE_KEY secret" "$SMOKE_DEVICE_KEY"
+          require_value "BARK_SMOKE_DEVICE_TOKEN secret" "$SMOKE_DEVICE_TOKEN"
+          require_value "D1_BACKUP_ENCRYPTION_KEY secret" "$D1_BACKUP_ENCRYPTION_KEY"
+
+          exit "$missing"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+          RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
+          SMOKE_BASE_URL: ${{ vars.PRODUCTION_SMOKE_URL }}
+          SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
+          SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+          D1_BACKUP_ENCRYPTION_KEY: ${{ secrets.D1_BACKUP_ENCRYPTION_KEY }}
+
+      - name: Render production Wrangler config
+        run: node .github/scripts/render-wrangler-config.mjs
+        env:
+          D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+          RATE_LIMIT_NAMESPACE_BASE: ${{ vars.PRODUCTION_RATE_LIMIT_NAMESPACE_BASE }}
+
+      - name: Dry-run production bundle
+        run: >-
+          ./node_modules/.bin/wrangler deploy
+          --dry-run
+          --strict
+          --config "$WRANGLER_CONFIG"
+          --outdir .wrangler/dry-run-production-bundle
+        env:
+          BASIC_AUTH: "ci-user:ci-password"
+          APNS_PRIVATE_KEY: "ci-placeholder-private-key"
+          APNS_TEAM_ID: "ci-placeholder-team"
+          APNS_KEY_ID: "ci-placeholder-key"
+          APNS_TOPIC: "ci.example.bark"
+
+      - name: Verify production Worker secret names
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_list_path=".wrangler/production-secret-names.json"
+          trap 'rm -f -- "$secret_list_path"' EXIT
+          umask 077
+          ./node_modules/.bin/wrangler secret list \
+            --format json \
+            --config "$WRANGLER_CONFIG" >"$secret_list_path"
+          node .github/scripts/verify-worker-secrets.mjs "$secret_list_path"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Record current production Worker version
+        id: previous_production
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployment_path=".wrangler/production-deployment-before.json"
+          trap 'rm -f -- "$deployment_path"' EXIT
+          umask 077
+          ./node_modules/.bin/wrangler deployments status \
+            --json \
+            --config "$WRANGLER_CONFIG" >"$deployment_path"
+          version_id="$(node .github/scripts/extract-active-version.mjs "$deployment_path")"
+          echo "version_id=$version_id" >>"$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Export production D1 backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .backups
+          if ! ./node_modules/.bin/wrangler d1 export database \
+            --remote \
+            --config "$WRANGLER_CONFIG" \
+            --output "$D1_BACKUP_PATH" >/dev/null 2>&1; then
+            echo "::error::Production D1 backup failed; export output was suppressed to protect database contents."
+            exit 1
           fi
-      
-          echo "Database ID: $DB_ID"
-          echo "DB_ID=$DB_ID" >> $GITHUB_ENV
+          if [[ ! -f "$D1_BACKUP_PATH" || ! -s "$D1_BACKUP_PATH" ]]; then
+            echo "::error::Production D1 backup is missing or empty."
+            exit 1
+          fi
+          chmod 600 "$D1_BACKUP_PATH"
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ inputs.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ inputs.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      - name: Update wrangler.toml
-        run: |
-          sed -i 's/"database_id": ".*"/"database_id": "'$DB_ID'"/' wrangler.json
+      - name: Encrypt production D1 backup
+        run: >-
+          node .github/scripts/encrypt-d1-backup.mjs
+          "$D1_BACKUP_PATH"
+          "$D1_BACKUP_CIPHERTEXT_PATH"
+        env:
+          D1_BACKUP_ENCRYPTION_KEY: ${{ secrets.D1_BACKUP_ENCRYPTION_KEY }}
 
-      - name: Deploy worker
-        uses: cloudflare/wrangler-action@v3.14.1
+      - name: Upload encrypted production D1 backup ciphertext
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          apiToken: ${{ inputs.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ inputs.CLOUDFLARE_ACCOUNT_ID }}
-          command: "deploy"
-          wranglerVersion: "4.16.1"
+          name: bark-production-d1-backup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.D1_BACKUP_CIPHERTEXT_PATH }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
+          overwrite: false
+          include-hidden-files: true
+
+      - name: Remove plaintext production D1 backup
+        run: rm -f -- "$D1_BACKUP_PATH"
+
+      - name: Apply production D1 migrations
+        run: >-
+          ./node_modules/.bin/wrangler d1 migrations apply database
+          --remote
+          --config "$WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy production Worker
+        id: production_deploy
+        run: >-
+          ./node_modules/.bin/wrangler deploy
+          --strict
+          --config "$WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Run production smoke
+        id: production_smoke
+        run: node .github/scripts/smoke.mjs
+        env:
+          SMOKE_BASE_URL: ${{ vars.PRODUCTION_SMOKE_URL }}
+          SMOKE_BASIC_AUTH: ${{ secrets.BARK_SMOKE_BASIC_AUTH }}
+          SMOKE_DEVICE_KEY: ${{ secrets.BARK_SMOKE_DEVICE_KEY }}
+          SMOKE_DEVICE_TOKEN: ${{ secrets.BARK_SMOKE_DEVICE_TOKEN }}
+
+      - name: Roll back production Worker after smoke failure
+        if: ${{ failure() && steps.production_deploy.outcome == 'success' && steps.production_smoke.outcome == 'failure' }}
+        run: >-
+          ./node_modules/.bin/wrangler rollback
+          "${{ steps.previous_production.outputs.version_id }}"
+          --message "Automated rollback after production smoke failure"
+          --yes
+          --config "$WRANGLER_CONFIG"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Remove local production D1 backup files
+        if: ${{ always() }}
+        run: rm -f -- "$D1_BACKUP_PATH" "$D1_BACKUP_CIPHERTEXT_PATH"
