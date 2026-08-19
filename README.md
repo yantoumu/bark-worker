@@ -8,7 +8,7 @@ English | **[中文文档](README.zh.md)**
 
 Bark-Worker is a [Bark server](https://github.com/Finb/bark-server) implementation for Cloudflare Workers. It provides a small, self-hosted backend for sending notifications to the [Bark iOS app](https://github.com/Finb/Bark).
 
-Production endpoint: `https://bark.seo9.org`.
+Production endpoint: `https://bark.seo9.org`; administration console: `https://bark.seo9.org/admin`.
 
 > [!IMPORTANT]
 > `main.js` is the default production entrypoint. The checked-in Wrangler configuration and deployment workflow target this D1 version. `main_kv.js` is a manually deployed legacy KV entrypoint: it has no D1 user login, encrypted APNs vault, or MCP support and is not selected by the default deployment path.
@@ -17,9 +17,10 @@ Production endpoint: `https://bark.seo9.org`.
 
 - `GET /ping`: public liveness check.
 - `GET /healthz`: readiness check with no sensitive configuration details.
+- `GET /admin`: responsive D1 administration console for login, user creation, and encrypted APNs credential management.
 - `GET /info`: authenticated service information; device counts are hidden unless `ALLOW_QUERY_NUMS="true"`.
 - `POST /auth/setup`: create the first D1 administrator with the one-time bootstrap token; permanently rejects once a user exists.
-- `POST /auth/login`, `POST /auth/logout`, and `GET /auth/me`: create, revoke, and inspect short-lived Bearer sessions.
+- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, and `GET /auth/session`: create, revoke, and inspect short-lived Bearer or browser sessions.
 - `POST /admin/users`: administrators add D1 users; passwords are stored only as salted, peppered PBKDF2-SHA256 hashes.
 - `GET/PUT /admin/apns`: administrators inspect or replace AES-256-GCM-encrypted APNs credentials; reads never return the private key or ciphertext.
 - `POST /register`: primary registration interface. It accepts JSON or form fields `device_key` and `device_token`, plus the legacy aliases `key` and `devicetoken`.
@@ -32,6 +33,8 @@ Batch mode takes precedence when a non-empty `device_keys` value is supplied. Th
 ## Secure defaults
 
 The repository configuration defaults to `SECURITY_MODE="strict"`. In strict mode, registration, push, MCP, and `/info` require authentication, while `/ping` remains public. Existing clients can keep using HTTP Basic, but credentials are now verified against D1 users; Bearer sessions returned by login are also accepted. The D1 entrypoint no longer reads a `BASIC_AUTH` environment variable.
+
+The administration console never stores its token in `localStorage` or `sessionStorage`. It uses a short-lived `__Host-`-prefixed, HttpOnly, Secure, SameSite=Strict cookie that is accepted only by browser-auth and administration routes. Cookie-authenticated mutations also require an exact same-origin `Origin`; the cookie cannot replace client authentication for registration, push, MCP, or `/info`.
 
 Runtime credentials are Cloudflare Secrets, never Wrangler `vars` or source constants:
 

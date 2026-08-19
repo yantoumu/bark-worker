@@ -5,6 +5,7 @@ import path from 'node:path'
 const projectRoot = process.cwd()
 const excludedDirectories = new Set([
     '.git',
+    '.playwright-cli',
     '.wrangler',
     '.backups',
     'coverage',

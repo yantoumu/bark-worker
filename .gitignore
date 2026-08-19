@@ -1,7 +1,9 @@
 .wrangler/
+.playwright-cli/
 .vscode/
 node_modules/
 coverage/
+output/playwright/
 .backups/
 .dev.vars*
 !.dev.vars.example

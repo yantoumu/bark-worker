@@ -2,7 +2,7 @@ import { readdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { extname, join } from 'node:path'
 
-const roots = ['main.js', 'main_kv.js', 'test', 'scripts', '.github/scripts']
+const roots = ['admin-ui.js', 'main.js', 'main_kv.js', 'test', 'scripts', '.github/scripts']
 const files = []
 
 async function collect(path) {

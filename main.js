@@ -1,11 +1,14 @@
+import { ADMIN_SCRIPT, ADMIN_STYLES, renderAdminHTML } from './admin-ui.js'
+
 const VERSION = 'v2.5.0'
-const BUILD = '2026-08-18'
+const BUILD = '2026-08-19'
 const SUPPORTED_MCP_PROTOCOLS = new Set(['2025-03-26', '2025-06-18'])
 const encoder = new TextEncoder()
 const schemaPromises = new WeakMap()
 const PASSWORD_ITERATIONS = 100000
 const PASSWORD_ALGORITHM = 'pbkdf2-sha256+pepper-v1'
 const AUTH_SESSION_TTL_SECONDS = 86400
+const AUTH_COOKIE_NAME = '__Host-bark_session'
 const APNS_CREDENTIAL_KEY_VERSION = 1
 const APNS_CREDENTIAL_AAD = encoder.encode('bark-worker:apns-credentials:v1')
 const PKCS8_PRIVATE_KEY_BEGIN = ['-----BEGIN ', 'PRIVATE KEY-----'].join('')
@@ -43,7 +46,7 @@ export default {
             }
 
             route = safeRouteName(pathname)
-            const response = await handleRequest(request, env ?? {}, ctx, pathname, requestId)
+            const response = await handleRequest(request, env ?? {}, ctx, pathname, requestId, rootPath)
             return attachRequestID(response, requestId)
         } catch (error) {
             if (!(error instanceof AppError)) {
@@ -60,9 +63,10 @@ export default {
     },
 }
 
-async function handleRequest(request, env, ctx, pathname, requestId) {
+async function handleRequest(request, env, ctx, pathname, requestId, rootPath) {
     if (pathname === '/') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        if (acceptsHTML(request)) return Response.redirect(adminURL(request, rootPath), 302)
         return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } })
     }
 
@@ -74,6 +78,26 @@ async function handleRequest(request, env, ctx, pathname, requestId) {
     if (pathname === '/healthz') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
         return healthz(env)
+    }
+
+    if (pathname === '/admin') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return adminAssetResponse(renderAdminHTML(VERSION, BUILD), 'text/html; charset=utf-8', true)
+    }
+
+    if (pathname === '/admin/') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return Response.redirect(adminURL(request, rootPath), 308)
+    }
+
+    if (pathname === '/admin/styles.css') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return adminAssetResponse(ADMIN_STYLES, 'text/css; charset=utf-8')
+    }
+
+    if (pathname === '/admin/app.js') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return adminAssetResponse(ADMIN_SCRIPT, 'text/javascript; charset=utf-8')
     }
 
     const config = parseConfig(env)
@@ -96,6 +120,11 @@ async function handleRequest(request, env, ctx, pathname, requestId) {
     if (pathname === '/auth/me') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
         return handleAuthMe(request, env, config)
+    }
+
+    if (pathname === '/auth/session') {
+        if (request.method !== 'GET') return methodNotAllowed(['GET'])
+        return handleAuthSession(request, env, config)
     }
 
     if (pathname === '/admin/users') {
@@ -174,6 +203,7 @@ async function handleAuthSetup(request, env, config) {
 }
 
 async function handleAuthLogin(request, env, config) {
+    rejectCrossOrigin(request)
     const input = await parseStructuredBody(request, config, ['application/json'])
     const username = validateUsername(input.username)
     const password = validatePassword(input.password)
@@ -186,7 +216,7 @@ async function handleAuthLogin(request, env, config) {
     const db = new Database(env.database)
     await db.ensureSchema()
     const user = await db.userByUsername(username)
-    if (!await passwordMatches(password, user, config.masterKey)) return unauthorized()
+    if (!await passwordMatches(password, user, config.masterKey)) return unauthorized(false)
 
     const tokenBytes = new Uint8Array(32)
     crypto.getRandomValues(tokenBytes)
@@ -204,22 +234,29 @@ async function handleAuthLogin(request, env, config) {
             user: { username: user.username, role: user.role },
         },
         timestamp: timestamp(),
-    }, 200, { 'cache-control': 'no-store' })
+    }, 200, {
+        'cache-control': 'no-store',
+        'set-cookie': authCookie(token, AUTH_SESSION_TTL_SECONDS),
+    })
 }
 
 async function handleAuthLogout(request, env, config) {
     const db = new Database(env.database)
     await db.ensureSchema()
-    const auth = await authorize(request, env, db, config, { required: true })
+    const auth = await authorize(request, env, db, config, { required: true, allowCookie: true })
     if (auth.response) return auth.response
+    requireCookieMutationOrigin(request, auth)
     if (auth.sessionTokenHash) await db.deleteAuthSession(auth.sessionTokenHash)
-    return jsonResponse({ code: 200, message: 'success', timestamp: timestamp() }, 200, { 'cache-control': 'no-store' })
+    return jsonResponse({ code: 200, message: 'success', timestamp: timestamp() }, 200, {
+        'cache-control': 'no-store',
+        'set-cookie': clearAuthCookie(),
+    })
 }
 
 async function handleAuthMe(request, env, config) {
     const db = new Database(env.database)
     await db.ensureSchema()
-    const auth = await authorize(request, env, db, config, { required: true })
+    const auth = await authorize(request, env, db, config, { required: true, allowCookie: true })
     if (auth.response) return auth.response
     return jsonResponse({
         code: 200,
@@ -229,11 +266,30 @@ async function handleAuthMe(request, env, config) {
     }, 200, { 'cache-control': 'no-store' })
 }
 
+async function handleAuthSession(request, env, config) {
+    const db = new Database(env.database)
+    await db.ensureSchema()
+    const auth = await authorize(request, env, db, config, { required: false, allowCookie: true })
+    if (auth.response) return auth.response
+    return jsonResponse({
+        code: 200,
+        message: 'success',
+        data: {
+            authenticated: auth.authenticated,
+            ...(auth.authenticated
+                ? { user: { username: auth.user.username, role: auth.user.role } }
+                : {}),
+        },
+        timestamp: timestamp(),
+    }, 200, { 'cache-control': 'no-store' })
+}
+
 async function handleAdminUsers(request, env, config) {
     const db = new Database(env.database)
     await db.ensureSchema()
-    const auth = await authorize(request, env, db, config, { required: true })
+    const auth = await authorize(request, env, db, config, { required: true, allowCookie: true })
     if (auth.response) return auth.response
+    requireCookieMutationOrigin(request, auth)
     if (auth.user.role !== 'admin') throw new AppError(403, 'forbidden')
     const input = await parseStructuredBody(request, config, ['application/json'])
     const username = validateUsername(input.username)
@@ -254,7 +310,7 @@ async function handleAdminUsers(request, env, config) {
 async function handleAdminAPNs(request, env, config) {
     const db = new Database(env.database)
     await db.ensureSchema()
-    const auth = await authorize(request, env, db, config, { required: true })
+    const auth = await authorize(request, env, db, config, { required: true, allowCookie: true })
     if (auth.response) return auth.response
     if (auth.user.role !== 'admin') throw new AppError(403, 'forbidden')
 
@@ -283,6 +339,7 @@ async function handleAdminAPNs(request, env, config) {
         }, 200, { 'cache-control': 'no-store' })
     }
 
+    requireCookieMutationOrigin(request, auth)
     const input = await parseStructuredBody(request, config, ['application/json'])
     const credentials = validateAPNsCredentials({
         apnsPrivateKey: input.private_key,
@@ -1506,8 +1563,24 @@ async function authorize(request, env, db, config, options = {}) {
     const required = options.required === true
     const header = request.headers.get('authorization')
     if (!header) {
+        if (options.allowCookie === true) {
+            const token = requestCookie(request, AUTH_COOKIE_NAME)
+            if (token && /^[A-Za-z0-9_-]{40,128}$/.test(token)) {
+                const sessionTokenHash = await sha256Base64URL(token)
+                const user = await db.authSession(sessionTokenHash)
+                if (user) {
+                    return {
+                        authenticated: true,
+                        response: null,
+                        user,
+                        sessionTokenHash,
+                        source: 'cookie',
+                    }
+                }
+            }
+        }
         if (!required) return { authenticated: false, response: null }
-        return { authenticated: false, response: unauthorized() }
+        return { authenticated: false, response: unauthorized(options.allowCookie !== true) }
     }
 
     if (header.startsWith('Basic ') && header.slice(6).length > 0) {
@@ -1541,20 +1614,53 @@ async function authorize(request, env, db, config, options = {}) {
         if (!await passwordMatches(password, user, config.masterKey)) {
             return { authenticated: false, response: unauthorized() }
         }
-        return { authenticated: true, response: null, user, sessionTokenHash: null }
+        return { authenticated: true, response: null, user, sessionTokenHash: null, source: 'basic' }
     }
 
     if (header.startsWith('Bearer ') && /^[A-Za-z0-9_-]{40,128}$/.test(header.slice(7))) {
         const sessionTokenHash = await sha256Base64URL(header.slice(7))
         const user = await db.authSession(sessionTokenHash)
-        if (user) return { authenticated: true, response: null, user, sessionTokenHash }
+        if (user) return { authenticated: true, response: null, user, sessionTokenHash, source: 'bearer' }
     }
     return { authenticated: false, response: unauthorized() }
 }
 
-function unauthorized() {
+function requestCookie(request, name) {
+    const header = request.headers.get('cookie')
+    if (!header) return null
+    for (const segment of header.split(';')) {
+        const separator = segment.indexOf('=')
+        if (separator < 0 || segment.slice(0, separator).trim() !== name) continue
+        return segment.slice(separator + 1).trim()
+    }
+    return null
+}
+
+function authCookie(token, maxAge) {
+    return `${AUTH_COOKIE_NAME}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`
+}
+
+function clearAuthCookie() {
+    return `${AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict`
+}
+
+function rejectCrossOrigin(request) {
+    const origin = request.headers.get('origin')
+    if (origin !== null && origin !== new URL(request.url).origin) {
+        throw new AppError(403, 'forbidden', { headers: { 'cache-control': 'no-store' } })
+    }
+}
+
+function requireCookieMutationOrigin(request, auth) {
+    if (auth.source !== 'cookie') return
+    if (request.headers.get('origin') !== new URL(request.url).origin) {
+        throw new AppError(403, 'forbidden', { headers: { 'cache-control': 'no-store' } })
+    }
+}
+
+function unauthorized(challenge = true) {
     return jsonError(401, 'Unauthorized', {
-        'www-authenticate': 'Basic realm="Bark"',
+        ...(challenge ? { 'www-authenticate': 'Basic realm="Bark"' } : {}),
         'cache-control': 'no-store',
     })
 }
@@ -1719,6 +1825,10 @@ function safeRouteName(pathname) {
         '/',
         '/ping',
         '/healthz',
+        '/admin',
+        '/admin/',
+        '/admin/styles.css',
+        '/admin/app.js',
         '/register',
         '/info',
         '/push',
@@ -1727,6 +1837,7 @@ function safeRouteName(pathname) {
         '/auth/login',
         '/auth/logout',
         '/auth/me',
+        '/auth/session',
         '/admin/users',
         '/admin/apns',
     ].includes(pathname)) return pathname
@@ -1767,6 +1878,42 @@ function isPlainObject(value) {
 
 function cleanObject(value) {
     return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null))
+}
+
+function acceptsHTML(request) {
+    const accept = request.headers.get('accept') ?? ''
+    return accept.split(',').some((entry) => {
+        const mediaType = entry.split(';', 1)[0].trim().toLowerCase()
+        return mediaType === 'text/html' || mediaType === 'application/xhtml+xml'
+    })
+}
+
+function adminURL(request, rootPath) {
+    const target = new URL(request.url)
+    target.pathname = rootPath === '/' ? '/admin' : `${rootPath}/admin`
+    target.search = ''
+    target.hash = ''
+    return target.toString()
+}
+
+function adminAssetResponse(body, contentType, document = false) {
+    const headers = {
+        'cache-control': 'private, no-store, no-transform',
+        'content-type': contentType,
+        'cross-origin-resource-policy': 'same-origin',
+        'permissions-policy': 'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
+        'referrer-policy': 'no-referrer',
+        'strict-transport-security': 'max-age=31536000; includeSubDomains',
+        'x-content-type-options': 'nosniff',
+        'x-robots-tag': 'noindex, nofollow, noarchive',
+        'x-xss-protection': '0',
+    }
+    if (document) {
+        headers['content-security-policy'] = "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'"
+        headers['cross-origin-opener-policy'] = 'same-origin'
+        headers['x-frame-options'] = 'DENY'
+    }
+    return new Response(body, { status: 200, headers })
 }
 
 function methodNotAllowed(methods) {

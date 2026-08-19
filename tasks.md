@@ -6,6 +6,19 @@
 >
 > 当前生产入口：`main.js`（D1）；`main_kv.js` 是仍被文档承诺的手工 KV 兼容版本。
 
+## 2026-08-19：管理前端与浏览器会话
+
+- [x] 新增响应式 `/admin` 管理台，提供登录、退出、添加用户、APNs 状态与加密凭据写入界面。
+- [x] 浏览器访问根路径时跳转到 `/admin`，`Accept: */*` 的 API 客户端仍获得原有 `ok` 响应。
+- [x] 登录建立 `__Host-` 前缀、HttpOnly、Secure、SameSite=Strict 的 D1 会话 Cookie；Token 不写入浏览器存储。
+- [x] Cookie 认证仅用于浏览器认证与管理路由，不能替代注册、推送、信息查询或 MCP 的 Basic/Bearer 认证。
+- [x] Cookie 管理写操作强制精确同源 Origin；管理页启用 strict CSP、HSTS、noindex、no-transform 与禁止 framing。
+- [x] 使用 390px 和 1440px 真实浏览器完成登录、创建用户、退出与响应式布局验证，控制台 0 error / 0 warning。
+- [x] `npm run verify` 全绿：31 个 JavaScript 文件语法通过，D1/KV 两轮各 237 项测试通过，Wrangler dry-run 成功。
+- [x] 部署到 `https://bark.seo9.org/admin`；生产版本 `a86a440c-8011-4c99-bd69-049f80b453c2` 为 100% 流量。
+- [x] 线上验证根路径跳转、HTTPS/HSTS、安全头、管理员登录、会话探测、APNs 元数据读取、退出清除与旧会话失效。
+- [ ] APNs 保险库仍为 `configured=false`；必须由用户提供新轮换的 Apple `.p8` Key 后才能完成真实推送 canary。
+
 ## 2026-08-18：D1 用户认证与 APNs 加密保险库增量
 
 本增量替代 D1 入口的 `BASIC_AUTH` 和 APNs 明文 Secret 合同；旧 KV 入口保持手工兼容，不宣称功能等价。
@@ -24,19 +37,19 @@
 - [x] 部署 `bark-worker` 到 `https://bark.seo9.org`，创建首个管理员并验证登录、D1 Basic、Bearer、登出失效和 APNs 元数据接口。
 - [ ] 使用已撤销泄漏旧 Key 后新创建的 APNs Key 写入保险库并完成真机 canary。
 
-### 权威执行状态（2026-08-18）
+### 权威执行状态（2026-08-19）
 
 下表是本轮实际执行状态与证据；下方各 Phase 的 checkbox 保留为原始验收清单，不能单独据此声称已经上线。
 
 | 范围 | 状态 | 本地证据 | 尚未满足的门禁 |
 | --- | --- | --- | --- |
 | Phase 0：APNs Key 事故响应 | **BLOCKED** | 仓库扫描未发现嵌入式私钥或 APNs 凭据 | 尚未确认 Apple Team/旧 Key 状态，未撤销轮换，未完成真实 APNs canary |
-| Phase 1–10：代码、测试、配置、CI 与文档 | **DONE** | 29 个 JavaScript 文件语法通过；D1/KV 两轮各 230 项测试全通过；toolchain 合同 12/12 通过 | APNs 真机链路仍受 Phase 0 阻断 |
-| 完整 `npm run verify` | **DONE** | exit 0；D1 line/branch/functions 93.77%/80.83%/94.62%，KV 89.55%/77.01%/96.39%；Wrangler dry-run 通过 | 本地门禁不替代下列真实线上证据 |
+| Phase 1–10：代码、测试、配置、CI 与文档 | **DONE** | 31 个 JavaScript 文件语法通过；D1/KV 两轮各 237 项测试全通过；toolchain 合同 12/12 通过 | APNs 真机链路仍受 Phase 0 阻断 |
+| 完整 `npm run verify` | **DONE** | exit 0；D1 line/branch/functions 94.03%/81.95%/95.00%，KV 89.55%/77.01%/96.39%；Wrangler dry-run 通过 | 本地门禁不替代下列真实线上证据 |
 | Production D1 migration | **DONE** | 生产导出经 AES-256-GCM 加密后解密逐字节一致；001–005 远端应用成功，再查无待应用 migration；原 3 个设备记录未丢失 | 加密备份需与 Keychain 内独立备份密钥一同保管 |
 | 配置与 CI 安全合同 | **DONE** | secret scan、YAML 解析、备份 AES-256-GCM 往返/篡改拒绝、Worker version UUID fixture、production/staging 渲染与 Wrangler dry-run 均通过；账号扫描确认 production namespace 3001–3005 不碰撞 | GitHub Environment 与 staging 的独立 namespace/Secrets 尚未配置 |
 | Staging | **NOT RUN** | 仅完成 workflow 门禁和本地 staging dry-run | 未执行远程 migration/deploy/smoke，未连续观察一个真实 UTC Cron 周期 |
-| Production | **CORE LIVE / APNs BLOCKED** | `https://bark.seo9.org`；Worker version `7c4ac7f6-4aee-4ef3-b8b3-fa3594488df2`；HTTPS ping/health 200、未认证 401、setup 201/409、Bearer/Basic 200、logout 后 401；D1 用户仅存 PBKDF2 元数据，旧 authorization 缓存已清空 | APNs vault 明确为 `configured=false`；尚缺新 Key、真实推送 canary、Cron 周期观察与 staging |
+| Production | **CORE + ADMIN UI LIVE / APNs BLOCKED** | `https://bark.seo9.org/admin`；Worker version `a86a440c-8011-4c99-bd69-049f80b453c2` 为 100%；HTTPS ping/health 200、管理页与安全头 200、Cookie 登录/探测/APNs 元数据/退出失效均通过；D1 用户仅存 PBKDF2 元数据 | APNs vault 明确为 `configured=false`；尚缺新 Key、真实推送 canary、Cron 周期观察与 staging |
 
 ### 集中上线阻断
 

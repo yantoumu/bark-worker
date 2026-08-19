@@ -8,7 +8,7 @@
 
 Bark-Worker 是运行在 Cloudflare Workers 上的 [Bark 服务端](https://github.com/Finb/bark-server)实现，为 [Bark iOS App](https://github.com/Finb/Bark) 提供轻量、自托管的通知后端。
 
-生产地址：`https://bark.seo9.org`。
+生产地址：`https://bark.seo9.org`；管理台：`https://bark.seo9.org/admin`。
 
 > [!IMPORTANT]
 > `main.js` 是默认生产入口。仓库内的 Wrangler 配置和部署工作流都以这个 D1 版本为目标。`main_kv.js` 是手工部署的旧 KV 兼容入口：它不支持 D1 用户登录、APNs 凭据保险库或 MCP，也不会被默认部署路径选中。
@@ -17,9 +17,10 @@ Bark-Worker 是运行在 Cloudflare Workers 上的 [Bark 服务端](https://gith
 
 - `GET /ping`：公开的存活检查。
 - `GET /healthz`：就绪检查，不泄露敏感配置细节。
+- `GET /admin`：响应式 D1 管理台，提供登录、添加用户和 APNs 加密凭据管理。
 - `GET /info`：需认证的服务信息；仅当 `ALLOW_QUERY_NUMS="true"` 时才显示设备数量。
 - `POST /auth/setup`：使用一次性引导令牌创建首个 D1 管理员；一旦已有用户即永久拒绝。
-- `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`：创建、撤销和检查短期 Bearer 会话。
+- `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`GET /auth/session`：创建、撤销和检查短期 Bearer 或浏览器会话。
 - `POST /admin/users`：管理员添加 D1 用户；密码只保存盐化、加 pepper 的 PBKDF2-SHA256 哈希。
 - `GET/PUT /admin/apns`：管理员检查或写入 AES-256-GCM 加密的 APNs 凭据；读取永不返回私钥或密文。
 - `POST /register`：主注册接口。支持 JSON 或表单字段 `device_key`、`device_token`，并兼容旧字段名 `key`、`devicetoken`。
@@ -32,6 +33,8 @@ Bark-Worker 是运行在 Cloudflare Workers 上的 [Bark 服务端](https://gith
 ## 安全默认值
 
 仓库配置默认使用 `SECURITY_MODE="strict"`。在 strict 模式下，注册、推送、MCP 和 `/info` 都需要认证，只有 `/ping` 保持公开。现有客户端可继续发送 HTTP Basic，但用户名和密码改由 D1 校验；登录接口返回的 Bearer 会话也可访问同一组接口。`BASIC_AUTH` 环境变量不再被 D1 入口读取。
+
+管理台不把 Token 写入 `localStorage` 或 `sessionStorage`，而是使用 `__Host-` 前缀、HttpOnly、Secure、SameSite=Strict 的短期 Cookie。Cookie 只对浏览器认证和管理路由生效，管理写操作还必须通过精确同源 Origin 校验；它不能替代注册、推送、MCP 或 `/info` 的客户端认证。
 
 运行时凭据必须使用 Cloudflare Secrets，不能放进 Wrangler `vars` 或源码常量：
 
