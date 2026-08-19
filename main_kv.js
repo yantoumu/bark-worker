@@ -62,6 +62,18 @@ async function handleRequest(request, env, ctx, pathname, requestId) {
         return healthz(env)
     }
 
+    if (pathname === '/ads.txt') {
+        if (!['GET', 'HEAD'].includes(request.method)) return methodNotAllowed(['GET', 'HEAD'])
+        return new Response('', {
+            status: 404,
+            headers: {
+                'content-type': 'text/plain; charset=utf-8',
+                'cache-control': 'public, max-age=300',
+                'x-content-type-options': 'nosniff',
+            },
+        })
+    }
+
     if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
         return jsonError(404, 'not found')
     }
@@ -965,7 +977,7 @@ function splitPath(pathname) {
 }
 
 function safeRouteName(pathname) {
-    if (['/', '/ping', '/healthz', '/register', '/info', '/push', '/mcp'].includes(pathname)) return pathname
+    if (['/', '/ping', '/healthz', '/ads.txt', '/register', '/info', '/push', '/mcp'].includes(pathname)) return pathname
     if (pathname.startsWith('/mcp/')) return '/mcp/:device'
     return '/:device'
 }

@@ -80,6 +80,18 @@ async function handleRequest(request, env, ctx, pathname, requestId, rootPath) {
         return healthz(env)
     }
 
+    if (pathname === '/ads.txt') {
+        if (!['GET', 'HEAD'].includes(request.method)) return methodNotAllowed(['GET', 'HEAD'])
+        return new Response('', {
+            status: 404,
+            headers: {
+                'content-type': 'text/plain; charset=utf-8',
+                'cache-control': 'public, max-age=300',
+                'x-content-type-options': 'nosniff',
+            },
+        })
+    }
+
     if (pathname === '/admin') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
         return adminAssetResponse(renderAdminHTML(), 'text/html; charset=utf-8', true)
@@ -1830,6 +1842,7 @@ function safeRouteName(pathname) {
         '/',
         '/ping',
         '/healthz',
+        '/ads.txt',
         '/admin',
         '/admin/',
         '/admin/styles.css',
