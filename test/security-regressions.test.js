@@ -185,6 +185,29 @@ for (const implementation of workers) {
         assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
     })
 
+    test(`${implementation.name}: strict legacy GET registration requires and accepts client authentication`, async () => {
+        const binding = implementation.binding([])
+        const env = await createTestEnv({
+            database: binding,
+            SECURITY_MODE: 'strict',
+            ALLOW_NEW_DEVICE: 'true',
+            ALLOW_LEGACY_GET_REGISTER: 'true',
+        })
+        const path = `/register?key=official-client-key&devicetoken=${'d'.repeat(64)}`
+
+        const unauthenticated = await request(implementation.worker, path, { env })
+        assert.equal(unauthenticated.response.status, 401)
+        assert.equal(implementation.storedToken(binding, 'official-client-key'), undefined)
+
+        const authenticated = await request(implementation.worker, path, {
+            env,
+            headers: authenticatedHeaders(),
+        })
+        assert.equal(authenticated.response.status, 200)
+        assert.equal(implementation.storedToken(binding, 'official-client-key'), 'd'.repeat(64))
+        assert.equal(authenticated.response.headers.get('sunset'), env.LEGACY_GET_REGISTER_SUNSET)
+    })
+
     test(`${implementation.name}: unauthenticated callers cannot rebind an existing key`, async () => {
         const binding = implementation.binding()
         const env = await createTestEnv({ database: binding, SECURITY_MODE: 'strict' })

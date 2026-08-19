@@ -45,7 +45,9 @@ User records, login-token hashes, and APNs ciphertext live in D1. Passwords are 
 
 Only the lowercase strings `"true"` and `"false"` are accepted for boolean configuration. A misspelling such as `"False"` is a configuration error. `SECURITY_MODE="compat"` is an explicit, temporary migration mode; it is not the recommended production default and never disables MCP authentication.
 
-The primary registration method is `POST /register`. Legacy GET registration is disabled unless `ALLOW_LEGACY_GET_REGISTER="true"`; enabling it also requires `LEGACY_GET_REGISTER_SUNSET` to be a valid HTTP-date. Missing or invalid dates are configuration errors. Enabled responses carry `Deprecation`, the configured `Sunset`, `Cache-Control: no-store`, and `Referrer-Policy: no-referrer`. Treat that `Sunset` value as the migration deadline. Do not put a real device token or key in a URL, terminal history, log, support ticket, or screenshot.
+The primary registration method is `POST /register`. The production configuration explicitly enables authenticated legacy GET registration until `Fri, 31 Dec 2027 23:59:59 GMT` because the current App Store Bark client still uses that request shape. `ALLOW_LEGACY_GET_REGISTER="true"` requires `LEGACY_GET_REGISTER_SUNSET` to be a valid HTTP-date; missing or invalid dates are configuration errors. Enabled responses carry `Deprecation`, the configured `Sunset`, `Cache-Control: no-store`, and `Referrer-Policy: no-referrer`. Revisit the compatibility window before that date. Never enable anonymous rebinds to support the app.
+
+For the official Bark app, create a dedicated D1 user with role `user` and add the server as `https://<client-user>:<URL-safe-client-password>@<host>`. Do not use an administrator account: Bark stores the full server address and includes it when copying the device push URL. The client credential is therefore a push credential, not an administration credential. Avoid placing real credentials, device tokens, or keys in logs, support tickets, screenshots, or source control.
 
 Existing-key behavior is deliberately conservative:
 

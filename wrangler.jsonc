@@ -81,12 +81,13 @@
         "SECURITY_MODE": "strict",
         "ALLOW_NEW_DEVICE": "true",
         "ALLOW_QUERY_NUMS": "false",
-        "ALLOW_LEGACY_GET_REGISTER": "false",
+        // The App Store Bark client still registers with authenticated GET.
+        // Keep strict authentication enabled and revisit this compatibility
+        // window before the advertised Sunset date.
+        "ALLOW_LEGACY_GET_REGISTER": "true",
+        "LEGACY_GET_REGISTER_SUNSET": "Fri, 31 Dec 2027 23:59:59 GMT",
         "ALLOW_INSECURE_DEVICE_REBIND": "false",
         "MCP_ALLOWED_ORIGINS": "",
-        // Required only when ALLOW_LEGACY_GET_REGISTER is "true". Uncomment and
-        // replace the placeholder with the real migration deadline as a valid HTTP-date.
-        // "LEGACY_GET_REGISTER_SUNSET": "<valid HTTP-date selected for this migration>",
         "ROOT_PATH": "/",
         "MAX_REQUEST_BYTES": "32768",
         "MAX_BATCH_SIZE": "20",

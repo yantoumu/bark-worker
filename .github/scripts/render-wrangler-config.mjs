@@ -16,7 +16,8 @@ const strictVars = {
     SECURITY_MODE: 'strict',
     ALLOW_NEW_DEVICE: 'true',
     ALLOW_QUERY_NUMS: 'false',
-    ALLOW_LEGACY_GET_REGISTER: 'false',
+    ALLOW_LEGACY_GET_REGISTER: 'true',
+    LEGACY_GET_REGISTER_SUNSET: 'Fri, 31 Dec 2027 23:59:59 GMT',
     ALLOW_INSECURE_DEVICE_REBIND: 'false',
     MCP_ALLOWED_ORIGINS: '',
     ROOT_PATH: '/',
@@ -86,11 +87,6 @@ function validateConfig(config, expectedDatabaseId, expectedRateLimitNamespaceId
     for (const secretName of requiredSecrets) {
         assert(!(secretName in vars), secretName + ' must not be stored in vars')
     }
-    assert(
-        !('LEGACY_GET_REGISTER_SUNSET' in vars),
-        'LEGACY_GET_REGISTER_SUNSET must stay unset while legacy GET registration is disabled',
-    )
-
     const configuredSecrets = config.secrets?.required
     assert(Array.isArray(configuredSecrets), 'secrets.required must be an array')
     assert(
