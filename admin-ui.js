@@ -1,4 +1,4 @@
-export function renderAdminHTML(version, build) {
+export function renderAdminHTML() {
     const privateKeyPlaceholder = ['-----BEGIN ', 'PRIVATE KEY-----'].join('')
     return `<!doctype html>
 <html lang="zh-CN">
@@ -8,7 +8,7 @@ export function renderAdminHTML(version, build) {
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="#f3f5f7">
     <meta name="robots" content="noindex,nofollow,noarchive">
-    <title>Bark Worker 管理台</title>
+    <title>Bark 管理台</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23137448'/%3E%3Ccircle cx='32' cy='29' r='12' fill='none' stroke='white' stroke-width='6'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="./admin/styles.css">
     <script type="module" src="./admin/app.js"></script>
@@ -17,17 +17,13 @@ export function renderAdminHTML(version, build) {
     <a class="skip-link" href="#main-content">跳到主要内容</a>
 
     <header class="site-header">
-        <a class="brand" href="./admin" aria-label="Bark Worker 管理台首页">
+        <a class="brand" href="./admin" aria-label="Bark 管理台首页">
             <span class="brand-mark" aria-hidden="true"><span></span></span>
             <span class="brand-copy">
                 <strong>Bark</strong>
-                <small>Worker Control</small>
+                <small>管理台</small>
             </span>
         </a>
-        <div class="secure-status" aria-label="连接状态">
-            <span class="status-dot" aria-hidden="true"></span>
-            安全连接
-        </div>
     </header>
 
     <main id="main-content">
@@ -37,32 +33,10 @@ export function renderAdminHTML(version, build) {
         </section>
 
         <section id="login-view" class="login-layout" hidden>
-            <div class="login-intro">
-                <p class="eyebrow">SELF-HOSTED CONTROL PLANE</p>
-                <h1>安全管理你的<br>通知基础设施</h1>
-                <p class="intro-copy">集中管理发送账号与 APNs 凭据。密码不可逆存储，私钥在写入 D1 前完成 AES-256-GCM 加密。</p>
-
-                <dl class="security-list">
-                    <div>
-                        <dt><span class="security-number">01</span>登录凭据</dt>
-                        <dd>PBKDF2-SHA256 与独立盐保护</dd>
-                    </div>
-                    <div>
-                        <dt><span class="security-number">02</span>浏览器会话</dt>
-                        <dd>HttpOnly 与 SameSite 严格隔离</dd>
-                    </div>
-                    <div>
-                        <dt><span class="security-number">03</span>APNs 私钥</dt>
-                        <dd>加密后保存，管理接口永不回显</dd>
-                    </div>
-                </dl>
-            </div>
-
             <div class="auth-column">
                 <div class="auth-heading">
-                    <p class="section-kicker">管理员入口</p>
-                    <h2 id="login-title">登录管理台</h2>
-                    <p>使用 D1 中已创建的管理员账号继续。</p>
+                    <h1 id="login-title">登录</h1>
+                    <p>请输入管理员账号。</p>
                 </div>
 
                 <form id="login-form" class="form-stack" aria-labelledby="login-title" novalidate>
@@ -79,10 +53,10 @@ export function renderAdminHTML(version, build) {
                         </label>
                     </div>
                     <p id="login-message" class="form-message" aria-live="polite"></p>
-                    <button id="login-button" class="button button-primary button-full" type="submit">登录管理台</button>
+                    <button id="login-button" class="button button-primary button-full" type="submit">登录</button>
                 </form>
 
-                <p class="auth-footnote">此页面不会在浏览器存储密码或访问令牌。</p>
+                <p class="auth-footnote">仅限授权用户访问。</p>
             </div>
         </section>
 
@@ -96,17 +70,12 @@ export function renderAdminHTML(version, build) {
                         <a class="nav-link" href="#apns">APNs 凭据</a>
                     </nav>
                 </div>
-                <div class="sidebar-version">
-                    <span>运行版本</span>
-                    <strong>${version}</strong>
-                    <small>Build ${build}</small>
-                </div>
             </aside>
 
             <div class="dashboard-content">
                 <header class="dashboard-header">
                     <div>
-                        <p class="section-kicker">Bark Worker</p>
+                        <p class="section-kicker">Bark</p>
                         <h1>管理概览</h1>
                     </div>
                     <div class="account-actions">
@@ -133,17 +102,17 @@ export function renderAdminHTML(version, build) {
                         <article class="metric-card">
                             <span class="metric-label">身份认证</span>
                             <strong>已启用</strong>
-                            <p>D1 用户与短期会话</p>
+                            <p>管理账号可用</p>
                         </article>
                         <article class="metric-card">
                             <span class="metric-label">APNs 凭据</span>
                             <strong id="apns-summary">检查中</strong>
-                            <p id="apns-summary-detail">正在读取加密保险库</p>
+                            <p id="apns-summary-detail">正在读取配置</p>
                         </article>
                         <article class="metric-card">
-                            <span class="metric-label">数据保护</span>
-                            <strong>AES-256-GCM</strong>
-                            <p>私钥静态加密存储</p>
+                            <span class="metric-label">访问控制</span>
+                            <strong>已启用</strong>
+                            <p>管理操作受保护</p>
                         </article>
                     </div>
                 </section>
@@ -187,7 +156,7 @@ export function renderAdminHTML(version, build) {
                         <div class="panel-heading">
                             <div>
                                 <p class="section-kicker">APPLE PUSH</p>
-                                <h2 id="apns-title">APNs 加密凭据</h2>
+                                <h2 id="apns-title">APNs 凭据</h2>
                             </div>
                             <span id="apns-status" class="status-badge" data-state="loading">检查中</span>
                         </div>
@@ -211,7 +180,7 @@ export function renderAdminHTML(version, build) {
                             <div class="field">
                                 <label for="private-key-file">Apple 私钥文件</label>
                                 <input id="private-key-file" class="file-input" type="file" accept=".p8,text/plain">
-                                <span class="field-hint">选择 .p8 文件后会在下方预览，文件不会直接上传到其他服务。</span>
+                                <span class="field-hint">选择 .p8 文件后会填入下方内容。</span>
                             </div>
                             <div class="field">
                                 <label for="private-key">私钥内容</label>
@@ -219,7 +188,7 @@ export function renderAdminHTML(version, build) {
                             </div>
                             <div class="form-footer">
                                 <p id="apns-message" class="form-message" aria-live="polite"></p>
-                                <button id="apns-button" class="button button-primary" type="submit">加密保存凭据</button>
+                                <button id="apns-button" class="button button-primary" type="submit">保存凭据</button>
                             </div>
                         </form>
                     </section>
@@ -228,10 +197,6 @@ export function renderAdminHTML(version, build) {
         </section>
     </main>
 
-    <footer class="site-footer">
-        <span>Bark Worker ${version}</span>
-        <span>凭据由你的 Cloudflare D1 与 Worker Secret 共同保护</span>
-    </footer>
 </body>
 </html>`
 }
@@ -274,7 +239,7 @@ html {
 }
 
 body {
-    min-height: 100vh;
+    min-height: 100dvh;
     margin: 0;
     background: var(--page);
     color: var(--ink);
@@ -390,7 +355,6 @@ a {
     text-transform: uppercase;
 }
 
-.secure-status,
 .live-badge,
 .status-badge {
     display: inline-flex;
@@ -416,7 +380,7 @@ a {
 
 .loading-view {
     display: grid;
-    min-height: calc(100vh - 136px);
+    min-height: calc(100dvh - 72px);
     place-content: center;
     justify-items: center;
     gap: 14px;
@@ -438,20 +402,13 @@ a {
 
 .login-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.7fr);
-    gap: clamp(48px, 9vw, 124px);
-    align-items: center;
-    width: min(var(--max-width), calc(100% - 40px));
-    min-height: calc(100vh - 142px);
+    width: min(440px, calc(100% - 40px));
+    min-height: calc(100dvh - 72px);
     margin: 0 auto;
-    padding: clamp(56px, 8vw, 104px) 0;
+    padding: 40px 0 64px;
+    place-items: center;
 }
 
-.login-intro {
-    max-width: 650px;
-}
-
-.eyebrow,
 .section-kicker,
 .sidebar-label {
     margin: 0 0 10px;
@@ -462,61 +419,8 @@ a {
     text-transform: uppercase;
 }
 
-.login-intro h1 {
-    max-width: 700px;
-    margin: 0;
-    font-size: clamp(43px, 6.3vw, 78px);
-    font-weight: 720;
-    letter-spacing: -0.055em;
-    line-height: 1.02;
-}
-
-.intro-copy {
-    max-width: 590px;
-    margin: 30px 0 0;
-    color: var(--ink-soft);
-    font-size: clamp(16px, 2vw, 19px);
-    line-height: 1.75;
-}
-
-.security-list {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1px;
-    margin: 50px 0 0;
-    overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-lg);
-    background: var(--line);
-}
-
-.security-list div {
-    min-width: 0;
-    padding: 18px;
-    background: var(--surface);
-}
-
-.security-list dt {
-    display: grid;
-    gap: 9px;
-    font-size: 13px;
-    font-weight: 750;
-}
-
-.security-number {
-    color: var(--accent);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-}
-
-.security-list dd {
-    margin: 7px 0 0;
-    color: var(--ink-faint);
-    font-size: 12px;
-    line-height: 1.55;
-}
-
 .auth-column {
+    width: 100%;
     padding: clamp(28px, 4vw, 42px);
     border: 1px solid var(--line);
     border-radius: var(--radius-lg);
@@ -524,7 +428,7 @@ a {
     box-shadow: var(--shadow);
 }
 
-.auth-heading h2,
+.auth-heading h1,
 .dashboard-header h1,
 .section-heading h2,
 .panel-heading h2 {
@@ -533,7 +437,7 @@ a {
     line-height: 1.12;
 }
 
-.auth-heading h2 {
+.auth-heading h1 {
     font-size: 30px;
 }
 
@@ -728,14 +632,14 @@ textarea:focus {
     display: grid;
     grid-template-columns: 230px minmax(0, 1fr);
     width: min(1440px, 100%);
-    min-height: calc(100vh - 120px);
+    min-height: calc(100dvh - 72px);
     margin: 0 auto;
 }
 
 .sidebar {
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
+    justify-content: flex-start;
     padding: 40px 24px 32px clamp(20px, 3vw, 42px);
     border-right: 1px solid var(--line);
 }
@@ -759,28 +663,6 @@ textarea:focus {
 .nav-link.active {
     background: var(--accent-soft);
     color: var(--accent);
-}
-
-.sidebar-version {
-    display: grid;
-    gap: 3px;
-    padding: 16px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-}
-
-.sidebar-version span,
-.sidebar-version small {
-    color: var(--ink-faint);
-    font-size: 10px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-}
-
-.sidebar-version strong {
-    margin: 3px 0;
-    font-size: 15px;
 }
 
 .dashboard-content {
@@ -928,28 +810,7 @@ textarea:focus {
     color: var(--warning);
 }
 
-.site-footer {
-    display: flex;
-    justify-content: space-between;
-    gap: 20px;
-    padding: 16px clamp(20px, 4vw, 56px);
-    border-top: 1px solid var(--line);
-    color: var(--ink-faint);
-    font-size: 10px;
-    letter-spacing: 0.03em;
-}
-
 @media (max-width: 900px) {
-    .login-layout {
-        grid-template-columns: 1fr;
-        gap: 44px;
-        width: min(660px, calc(100% - 36px));
-    }
-
-    .login-intro h1 {
-        font-size: clamp(41px, 10vw, 62px);
-    }
-
     .dashboard {
         grid-template-columns: 1fr;
     }
@@ -964,28 +825,14 @@ textarea:focus {
 }
 
 @media (max-width: 680px) {
-    .secure-status {
-        padding-inline: 8px;
-        font-size: 11px;
-    }
-
     .login-layout {
-        padding: 44px 0 56px;
+        padding: 28px 0 48px;
     }
 
-    .auth-column {
-        order: -1;
-    }
-
-    .security-list,
     .metric-grid,
     .field-row,
     .field-row-three {
         grid-template-columns: 1fr;
-    }
-
-    .security-list {
-        margin-top: 34px;
     }
 
     .auth-column {
@@ -1020,10 +867,6 @@ textarea:focus {
         min-height: 48px;
     }
 
-    .site-footer {
-        flex-direction: column;
-        gap: 5px;
-    }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1157,7 +1000,7 @@ function friendlyError(error) {
     if (error?.status === 403) return '当前账号没有执行此操作的权限。'
     if (error?.status === 409) return '该用户名已经存在。'
     if (error?.status === 429) return '尝试次数过多，请稍后再试。'
-    if (error?.status === 503) return '服务配置暂不可用，请检查 Worker 配置。'
+    if (error?.status === 503) return '服务暂不可用，请稍后重试。'
     if (error?.message === 'APNs credentials are invalid') return 'APNs 凭据格式无效，请核对 .p8 私钥与标识。'
     return '请求失败，请稍后重试。'
 }
@@ -1178,12 +1021,12 @@ async function loadAPNsStatus() {
         const payload = await api('/admin/apns')
         const data = payload?.data || {}
         if (data.configured) {
-            elements.apnsStatus.textContent = '已加密保存'
+            elements.apnsStatus.textContent = '已保存'
             elements.apnsStatus.dataset.state = 'configured'
             elements.apnsSummary.textContent = '已配置'
             elements.apnsSummaryDetail.textContent = data.updated_at
                 ? '更新于 ' + new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(data.updated_at * 1000)
-                : '加密凭据可用'
+                : '凭据可用'
             elements.teamID.value = data.team_id || ''
             elements.keyID.value = data.key_id || ''
             elements.topic.value = data.topic || ''
@@ -1225,7 +1068,7 @@ elements.loginForm.addEventListener('submit', async (event) => {
     event.preventDefault()
     if (!elements.loginForm.reportValidity()) return
     setMessage(elements.loginMessage)
-    setBusy(elements.loginButton, true, '登录管理台', '正在登录')
+    setBusy(elements.loginButton, true, '登录', '正在登录')
     const form = new FormData(elements.loginForm)
     try {
         const payload = await api('/auth/login', {
@@ -1239,7 +1082,7 @@ elements.loginForm.addEventListener('submit', async (event) => {
     } catch (error) {
         setMessage(elements.loginMessage, friendlyError(error), 'error')
     } finally {
-        setBusy(elements.loginButton, false, '登录管理台', '正在登录')
+        setBusy(elements.loginButton, false, '登录', '正在登录')
     }
 })
 
@@ -1290,7 +1133,7 @@ elements.privateKeyFile.addEventListener('change', async () => {
     }
     try {
         elements.privateKey.value = await file.text()
-        setMessage(elements.apnsMessage, '已读取 ' + file.name + '，确认标识后即可加密保存。')
+        setMessage(elements.apnsMessage, '已读取 ' + file.name + '，确认标识后即可保存。')
     } catch (error) {
         setMessage(elements.apnsMessage, '无法读取该文件。', 'error')
     }
@@ -1300,7 +1143,7 @@ elements.apnsForm.addEventListener('submit', async (event) => {
     event.preventDefault()
     if (!elements.apnsForm.reportValidity()) return
     setMessage(elements.apnsMessage)
-    setBusy(elements.apnsButton, true, '加密保存凭据', '正在加密保存')
+    setBusy(elements.apnsButton, true, '保存凭据', '正在保存')
     const form = new FormData(elements.apnsForm)
     try {
         await api('/admin/apns', {
@@ -1314,13 +1157,13 @@ elements.apnsForm.addEventListener('submit', async (event) => {
         })
         elements.privateKey.value = ''
         elements.privateKeyFile.value = ''
-        setMessage(elements.apnsMessage, '凭据已加密保存，私钥内容已从页面清除。', 'success')
+        setMessage(elements.apnsMessage, '凭据已保存，私钥内容已从页面清除。', 'success')
         await loadAPNsStatus()
     } catch (error) {
         if (error.status === 401) return showLogin('登录已过期，请重新登录。')
         setMessage(elements.apnsMessage, friendlyError(error), 'error')
     } finally {
-        setBusy(elements.apnsButton, false, '加密保存凭据', '正在加密保存')
+        setBusy(elements.apnsButton, false, '保存凭据', '正在保存')
     }
 })
 

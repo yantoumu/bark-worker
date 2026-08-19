@@ -15,7 +15,7 @@
 - [x] Cookie 管理写操作强制精确同源 Origin；管理页启用 strict CSP、HSTS、noindex、no-transform 与禁止 framing。
 - [x] 使用 390px 和 1440px 真实浏览器完成登录、创建用户、退出与响应式布局验证，控制台 0 error / 0 warning。
 - [x] `npm run verify` 全绿：31 个 JavaScript 文件语法通过，D1/KV 两轮各 237 项测试通过，Wrangler dry-run 成功。
-- [x] 部署到 `https://bark.seo9.org/admin`；生产版本 `a86a440c-8011-4c99-bd69-049f80b453c2` 为 100% 流量。
+- [x] 部署到 `https://bark.seo9.org/admin`；生产版本 `d2e48492-cae4-44e6-a572-02d071f25b84` 为 100% 流量。
 - [x] 线上验证根路径跳转、HTTPS/HSTS、安全头、管理员登录、会话探测、APNs 元数据读取、退出清除与旧会话失效。
 - [ ] APNs 保险库仍为 `configured=false`；必须由用户提供新轮换的 Apple `.p8` Key 后才能完成真实推送 canary。
 
@@ -49,7 +49,7 @@
 | Production D1 migration | **DONE** | 生产导出经 AES-256-GCM 加密后解密逐字节一致；001–005 远端应用成功，再查无待应用 migration；原 3 个设备记录未丢失 | 加密备份需与 Keychain 内独立备份密钥一同保管 |
 | 配置与 CI 安全合同 | **DONE** | secret scan、YAML 解析、备份 AES-256-GCM 往返/篡改拒绝、Worker version UUID fixture、production/staging 渲染与 Wrangler dry-run 均通过；账号扫描确认 production namespace 3001–3005 不碰撞 | GitHub Environment 与 staging 的独立 namespace/Secrets 尚未配置 |
 | Staging | **NOT RUN** | 仅完成 workflow 门禁和本地 staging dry-run | 未执行远程 migration/deploy/smoke，未连续观察一个真实 UTC Cron 周期 |
-| Production | **CORE + ADMIN UI LIVE / APNs BLOCKED** | `https://bark.seo9.org/admin`；Worker version `a86a440c-8011-4c99-bd69-049f80b453c2` 为 100%；HTTPS ping/health 200、管理页与安全头 200、Cookie 登录/探测/APNs 元数据/退出失效均通过；D1 用户仅存 PBKDF2 元数据 | APNs vault 明确为 `configured=false`；尚缺新 Key、真实推送 canary、Cron 周期观察与 staging |
+| Production | **CORE + ADMIN UI LIVE / APNs BLOCKED** | `https://bark.seo9.org/admin`；Worker version `d2e48492-cae4-44e6-a572-02d071f25b84` 为 100%；HTTPS ping/health 200、管理页与安全头 200、Cookie 登录/探测/APNs 元数据/退出失效均通过；D1 用户仅存 PBKDF2 元数据 | APNs vault 明确为 `configured=false`；尚缺新 Key、真实推送 canary、Cron 周期观察与 staging |
 
 ### 集中上线阻断
 

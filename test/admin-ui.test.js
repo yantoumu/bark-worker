@@ -70,10 +70,12 @@ test('admin UI ships a complete accessible login and management surface with str
     assert.match(html, /<form[^>]+id="user-form"/)
     assert.match(html, /<form[^>]+id="apns-form"/)
     assert.match(html, /aria-live="polite"/)
-    assert.match(html, /Bark Worker 管理台/)
+    assert.match(html, /Bark 管理台/)
     assert.match(html, /name="robots" content="noindex,nofollow,noarchive"/)
     assert.equal((html.match(/pattern="\[A-Za-z0-9]\(\?:\[A-Za-z0-9\._]\|-\)\{1,62}\[A-Za-z0-9]"/g) ?? []).length, 2)
     assert.doesNotMatch(html, /<script(?![^>]+src=)/)
+    assert.doesNotMatch(html, /SELF-HOSTED|PBKDF2|AES-256|SameSite|HttpOnly|Cloudflare|D1|Worker Secret|运行版本|Build 20/)
+    assert.doesNotMatch(html, /安全管理你的|通知基础设施|security-list|login-intro/)
 
     assert.equal(stylesheet.response.status, 200)
     assert.match(stylesheet.response.headers.get('content-type') ?? '', /^text\/css/)
@@ -182,6 +184,10 @@ test('cross-origin browser login is rejected without creating a session', async 
 test('browser auth endpoints avoid native Basic prompts while push APIs keep their challenge', async () => {
     const env = await createTestEnv()
     const me = await request('/auth/me', { env })
+    const staleBasicHeaders = { authorization: 'Basic aW52YWxpZA==' }
+    const staleSession = await request('/auth/session', { env, headers: staleBasicHeaders })
+    const staleMe = await request('/auth/me', { env, headers: staleBasicHeaders })
+    const staleAPNs = await request('/admin/apns', { env, headers: staleBasicHeaders })
     const badLogin = await request('/auth/login', {
         env,
         method: 'POST',
@@ -197,10 +203,34 @@ test('browser auth endpoints avoid native Basic prompts while push APIs keep the
 
     assert.equal(me.response.status, 401)
     assert.equal(me.response.headers.has('www-authenticate'), false)
+    assert.equal(staleSession.response.status, 200)
+    assert.deepEqual((await readJson(staleSession.response)).data, { authenticated: false })
+    assert.equal(staleMe.response.status, 401)
+    assert.equal(staleMe.response.headers.has('www-authenticate'), false)
+    assert.equal(staleAPNs.response.status, 401)
+    assert.equal(staleAPNs.response.headers.has('www-authenticate'), false)
     assert.equal(badLogin.response.status, 401)
     assert.equal(badLogin.response.headers.has('www-authenticate'), false)
     assert.equal(push.response.status, 401)
     assert.equal(push.response.headers.get('www-authenticate'), 'Basic realm="Bark"')
+})
+
+test('a valid browser cookie wins over a stale Basic Authorization header', async () => {
+    const env = await createTestEnv()
+    const session = await login(env)
+    const response = await request('/auth/session', {
+        env,
+        headers: {
+            cookie: session.cookie,
+            authorization: 'Basic aW52YWxpZA==',
+        },
+    })
+
+    assert.equal(response.response.status, 200)
+    assert.deepEqual((await readJson(response.response)).data, {
+        authenticated: true,
+        user: { username: 'admin', role: 'admin' },
+    })
 })
 
 test('browser session probe returns a quiet unauthenticated state and recognizes its cookie', async () => {

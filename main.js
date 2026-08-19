@@ -82,7 +82,7 @@ async function handleRequest(request, env, ctx, pathname, requestId, rootPath) {
 
     if (pathname === '/admin') {
         if (request.method !== 'GET') return methodNotAllowed(['GET'])
-        return adminAssetResponse(renderAdminHTML(VERSION, BUILD), 'text/html; charset=utf-8', true)
+        return adminAssetResponse(renderAdminHTML(), 'text/html; charset=utf-8', true)
     }
 
     if (pathname === '/admin/') {
@@ -1561,32 +1561,37 @@ function optionalConfigString(value) {
 
 async function authorize(request, env, db, config, options = {}) {
     const required = options.required === true
+    const browserAuth = options.allowCookie === true
+    const failed = () => ({
+        authenticated: false,
+        response: required || !browserAuth ? unauthorized(!browserAuth) : null,
+    })
     const header = request.headers.get('authorization')
-    if (!header) {
-        if (options.allowCookie === true) {
-            const token = requestCookie(request, AUTH_COOKIE_NAME)
-            if (token && /^[A-Za-z0-9_-]{40,128}$/.test(token)) {
-                const sessionTokenHash = await sha256Base64URL(token)
-                const user = await db.authSession(sessionTokenHash)
-                if (user) {
-                    return {
-                        authenticated: true,
-                        response: null,
-                        user,
-                        sessionTokenHash,
-                        source: 'cookie',
-                    }
+    if (browserAuth) {
+        const token = requestCookie(request, AUTH_COOKIE_NAME)
+        if (token && /^[A-Za-z0-9_-]{40,128}$/.test(token)) {
+            const sessionTokenHash = await sha256Base64URL(token)
+            const user = await db.authSession(sessionTokenHash)
+            if (user) {
+                return {
+                    authenticated: true,
+                    response: null,
+                    user,
+                    sessionTokenHash,
+                    source: 'cookie',
                 }
             }
         }
+    }
+    if (!header) {
         if (!required) return { authenticated: false, response: null }
-        return { authenticated: false, response: unauthorized(options.allowCookie !== true) }
+        return failed()
     }
 
     if (header.startsWith('Basic ') && header.slice(6).length > 0) {
         const encodedCredentials = header.slice(6)
         if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedCredentials)) {
-            return { authenticated: false, response: unauthorized() }
+            return failed()
         }
         let decoded
         try {
@@ -1594,15 +1599,15 @@ async function authorize(request, env, db, config, options = {}) {
             if (base64Encode(decodedBytes) !== encodedCredentials) throw new Error('non-canonical credentials')
             decoded = new TextDecoder('utf-8', { fatal: true }).decode(decodedBytes)
         } catch (error) {
-            return { authenticated: false, response: unauthorized() }
+            return failed()
         }
         const separator = decoded.indexOf(':')
-        if (separator < 1) return { authenticated: false, response: unauthorized() }
+        if (separator < 1) return failed()
         let username
         try {
             username = validateUsername(decoded.slice(0, separator))
         } catch (error) {
-            return { authenticated: false, response: unauthorized() }
+            return failed()
         }
         const limited = await enforceRateLimit(
             env.AUTH_RATE_LIMITER,
@@ -1612,7 +1617,7 @@ async function authorize(request, env, db, config, options = {}) {
         const password = decoded.slice(separator + 1)
         const user = await db.userByUsername(username)
         if (!await passwordMatches(password, user, config.masterKey)) {
-            return { authenticated: false, response: unauthorized() }
+            return failed()
         }
         return { authenticated: true, response: null, user, sessionTokenHash: null, source: 'basic' }
     }
@@ -1622,7 +1627,7 @@ async function authorize(request, env, db, config, options = {}) {
         const user = await db.authSession(sessionTokenHash)
         if (user) return { authenticated: true, response: null, user, sessionTokenHash, source: 'bearer' }
     }
-    return { authenticated: false, response: unauthorized() }
+    return failed()
 }
 
 function requestCookie(request, name) {
